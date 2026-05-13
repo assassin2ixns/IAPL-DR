@@ -18,6 +18,17 @@ from test_time import testtime_main
 from timm.utils import ModelEmaV2
 from timm.utils import get_state_dict
 
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1', 'y'):
+        return True
+    if v.lower() in ('no', 'false', 'f', '0', 'n'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
         
@@ -52,6 +63,7 @@ def get_args_parser():
     parser.add_argument('--text_adapter_list', type=list, default=[])
 
     # model
+    parser.add_argument('--method', type=str, default='iapl', choices=['iapl', 'dream_cs'])
     parser.add_argument('--backbone', type=str, default='CLIP:ViT-L/14')
     parser.add_argument('--clip_path', type=str, default='/Path/to/ViT-L-14.pt')
 
@@ -71,12 +83,46 @@ def get_args_parser():
     parser.add_argument('--selection_p', type=float, default=0.2)
     parser.add_argument('--ois', type=bool, default=False)
 
+    # DREAM-CS
+    parser.add_argument('--dream_num_experts', type=int, default=3)
+    parser.add_argument('--dream_expert_names', nargs='+', default=['fine', 'stable', 'consensus'])
+    parser.add_argument('--dream_rank', type=int, default=8)
+    parser.add_argument('--dream_router_hidden', type=int, default=32)
+    parser.add_argument('--dream_delta_clip', type=float, default=1.0)
+    parser.add_argument('--dream_apply_init_bias', type=float, default=-4.0)
+    parser.add_argument('--dream_route_tau', type=float, default=0.5)
+    parser.add_argument('--dream_route_margin', type=float, default=0.0)
+    parser.add_argument('--dream_clean_safe_margin', type=float, default=0.0)
+    parser.add_argument('--dream_num_train_views', type=int, default=2)
+    parser.add_argument('--dream_degradation_pool', nargs='+', default=['jpeg', 'resize', 'blur', 'quant', 'webp'])
+    parser.add_argument('--dream_expert_forward_chunk', type=int, default=0)
+    parser.add_argument('--dream_eval_degradation', type=str, default='none',
+                        choices=['none', 'jpeg50', 'jpeg75', 'jpeg90', 'resize', 'blur', 'quant', 'webp'])
+    parser.add_argument('--dream_log_router', type=str2bool, default=True)
+    parser.add_argument('--dream_disable_router', type=str2bool, default=False)
+    parser.add_argument('--dream_disable_robust', type=str2bool, default=False)
+    parser.add_argument('--dream_disable_clean_safe', type=str2bool, default=False)
+    parser.add_argument('--dream_disable_route_loss', type=str2bool, default=False)
+    parser.add_argument('--dream_disable_expert_correction', type=str2bool, default=False)
+    parser.add_argument('--dream_anchor_ckpt', type=str, default='')
+    parser.add_argument('--dream_freeze_anchor', type=str2bool, default=False)
+    parser.add_argument('--dream_tta_safe', type=str2bool, default=True)
+    parser.add_argument('--dream_tta_agg', type=str, default='mean', choices=['confidence', 'mean', 'trimmed_mean'])
+
     # loss
     parser.add_argument('--loss_adapter', type=float, default=1.0)
     parser.add_argument('--loss_contrast', type=float, default=1.0)
     parser.add_argument('--loss_condition', type=float, default=1.0)
     parser.add_argument('--use_contrast', type=bool, default=False)
     parser.add_argument('--smooth', type=bool, default=False)
+    parser.add_argument('--loss_dream_clean', type=float, default=1.0)
+    parser.add_argument('--loss_dream_anchor', type=float, default=0.2)
+    parser.add_argument('--loss_dream_rob', type=float, default=0.5)
+    parser.add_argument('--loss_dream_inv', type=float, default=0.05)
+    parser.add_argument('--loss_dream_route', type=float, default=0.1)
+    parser.add_argument('--loss_dream_apply', type=float, default=0.05)
+    parser.add_argument('--loss_dream_clean_safe', type=float, default=0.5)
+    parser.add_argument('--loss_dream_res', type=float, default=0.01)
 
     # output
     parser.add_argument('--eval', action='store_true')
@@ -145,15 +191,16 @@ def main(args):
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
-        if args.ema:
-            model_ema = ModelEmaV2(model.module, decay=0.9999)  # 注意传入的是 model.module
-            print('-----------use EMA train mode----------')
-        else:
-            model_ema = None
+    if args.ema:
+        model_ema = ModelEmaV2(model_without_ddp, decay=0.9999)
+        print('-----------use EMA train mode----------')
+    else:
+        model_ema = None
     
     if args.eval:
         checkpoint = torch.load(args.pretrained_model, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        strict = getattr(args, 'method', 'iapl') != 'dream_cs'
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=strict)
 
         if args.ema and ('model_ema' in checkpoint.keys()):
             model_ema.module.load_state_dict(checkpoint['model_ema'])

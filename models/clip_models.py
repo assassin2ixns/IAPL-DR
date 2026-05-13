@@ -113,7 +113,7 @@ class CLIPModel(nn.Module):
                'SIZE': [args.image_size, args.image_size],
                'VISION_WIDTH': args.vision_width,}
         
-        clip_model = load_clip_to_cpu('/Path/to/ViT-L-14.pt', cfg['N_CTX'], args.vit_adapter_list, args.text_adapter_list, args.prompt_depth, args.gate)
+        clip_model = load_clip_to_cpu(args.clip_path, cfg['N_CTX'], args.vit_adapter_list, args.text_adapter_list, args.prompt_depth, args.gate)
 
         # learnable prompts
         self.prompt_learner = MultiModalPromptLearner(cfg, clip_model)
@@ -231,8 +231,9 @@ class CLIPModel(nn.Module):
                 param.requires_grad = False
         for param_name, param in self.fc_binary.named_parameters():
             param.requires_grad = False
-        for param_name, param in self.conditional_ctx.named_parameters():
-            param.requires_grad = False
+        if self.conditional_ctx is not None:
+            for param_name, param in self.conditional_ctx.named_parameters():
+                param.requires_grad = False
         print('-----------freezen TTA mode-----------')
         
 def _get_clones(module, N):

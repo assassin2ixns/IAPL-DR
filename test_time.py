@@ -1,6 +1,7 @@
 import argparse
 
 import time
+from contextlib import nullcontext
 import torch.distributed as dist
 from copy import deepcopy
 import pdb
@@ -26,9 +27,31 @@ import os
 import torch.nn as nn
 from scipy.ndimage import filters
 
+
+def unwrap_model(model):
+    return model.module if hasattr(model, 'module') else model
+
+
+def extract_logits(outputs):
+    if isinstance(outputs, dict):
+        return outputs['logits']
+    if isinstance(outputs, (list, tuple)):
+        return outputs[0]
+    return outputs
+
+
+def _strip_module_prefix(state_dict):
+    if any(key.startswith('module.') for key in state_dict.keys()):
+        return {
+            key.replace('module.', '', 1) if key.startswith('module.') else key: value
+            for key, value in state_dict.items()
+        }
+    return state_dict
+
+
 @torch.no_grad()
 def gather_together(data):
-    world_size = dist.get_world_size()
+    world_size = utils.get_world_size()
     if world_size < 2:
         return data
     dist.barrier()
@@ -66,15 +89,18 @@ def testtime_main(args):
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
     checkpoint = torch.load(args.pretrained_model, map_location='cpu')
-    model.module.load_state_dict(checkpoint['model'])
+    state_dict = _strip_module_prefix(checkpoint['model'])
+    m = unwrap_model(model)
+    strict = getattr(args, 'method', 'iapl') != 'dream_cs'
+    m.load_state_dict(state_dict, strict=strict)
 
-    pretrained_ctx = torch.load(args.pretrained_model, map_location='cpu')['model']['prompt_learner.ctx']
+    pretrained_ctx = state_dict.get('prompt_learner.ctx', None)
 
-    model.module.freeze_tta()
+    m.freeze_tta()
     
-    print([{"params": [n for n, p in model.module.named_parameters() if p.requires_grad]}])
+    print([{"params": [n for n, p in m.named_parameters() if p.requires_grad]}])
 
-    optimizer = torch.optim.AdamW([{"params": [p for n, p in model.module.named_parameters() if p.requires_grad]}], args.lr)
+    optimizer = torch.optim.AdamW([{"params": [p for n, p in m.named_parameters() if p.requires_grad]}], args.lr)
     optim_state = deepcopy(optimizer.state_dict())
     scaler = None
 
@@ -103,32 +129,48 @@ def testtime_main(args):
             
             # for every new image reset it params and optimizer.
             with torch.no_grad():
-                model.module.prompt_learner.ctx.copy_(pretrained_ctx)
+                if pretrained_ctx is not None and m.prompt_learner.ctx is not None:
+                    m.prompt_learner.ctx.copy_(pretrained_ctx.to(m.prompt_learner.ctx.device))
                 
             optimizer.load_state_dict(optim_state)
 
             # tta 
-            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            autocast_enabled = device.type == 'cuda'
+            with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast_enabled):
                 model.train()
                 select_index = test_time_tuning(model, images, optimizer, scaler, args)
 
             # infer
-            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast_enabled):
                 with torch.no_grad():
                     model.eval()
                     if args.ois:
-                        outputs = model(images[select_index])
-                        preds = outputs.sigmoid()
-                        conf_idx = torch.max(torch.abs(preds - 0.5), dim=0)[1]
-                        pred = preds[conf_idx]
+                        selected_outputs = model(images[select_index])
+                        selected_logits = extract_logits(selected_outputs).flatten()
+                        if getattr(args, 'method', 'iapl') == 'dream_cs' and getattr(args, 'dream_tta_safe', True):
+                            probs = selected_logits.sigmoid()
+                            if args.dream_tta_agg == 'confidence':
+                                conf_idx = torch.max(torch.abs(probs - 0.5), dim=0)[1]
+                                pred = probs[conf_idx].view(1)
+                            elif args.dream_tta_agg == 'trimmed_mean':
+                                if probs.numel() >= 4:
+                                    probs_sorted = torch.sort(probs)[0]
+                                    pred = probs_sorted[1:-1].mean().view(1)
+                                else:
+                                    pred = probs.mean().view(1)
+                            else:
+                                pred = probs.mean().view(1)
+                        else:
+                            preds = selected_logits.sigmoid()
+                            conf_idx = torch.max(torch.abs(preds - 0.5), dim=0)[1]
+                            pred = preds[conf_idx].view(1)
                     else:
-                        pred = model(image)
-                        pred = pred.sigmoid()
+                        pred = extract_logits(model(image)).sigmoid()
 
             y_pred.extend(pred.flatten().tolist())
             y_true.extend(labels.flatten().tolist())
 
-        world_size = dist.get_world_size()
+        world_size = utils.get_world_size()
         if world_size < 2:
             merge_y_true = y_true
         else:
@@ -171,10 +213,12 @@ def test_time_tuning(model, inputs, optimizer, scaler, args):
     
     for j in range(args.tta_steps):
 
-        with model.no_sync():  # 多卡时梯度不进行聚合，各卡独立进行参数更新
+        sync_context = model.no_sync() if hasattr(model, 'no_sync') else nullcontext()
+        with sync_context:  # 多卡时梯度不进行聚合，各卡独立进行参数更新
             
-            output, _, _ = model(inputs) 
-            loss, index = binary_entropy(output.squeeze(), args.selection_p, args.ois)
+            outputs = model(inputs)
+            logits = extract_logits(outputs).flatten()
+            loss, index = binary_entropy(logits, args.selection_p, args.ois)
 
             optimizer.zero_grad()
             loss.backward()
@@ -184,13 +228,13 @@ def test_time_tuning(model, inputs, optimizer, scaler, args):
 
 def binary_entropy(logits, selection_p, ois):
 
-    select_num = int(len(logits) * selection_p)
+    select_num = min(len(logits), max(1, int(len(logits) * selection_p)))
 
     if ois:
 
         with torch.no_grad():
             confidence = F.softmax(torch.abs(torch.sigmoid(logits) - 0.5) * 2, dim=0)
-            select, index = torch.topk(confidence, select_num ,dim=0)
+            select, index = torch.topk(confidence, select_num, dim=0)
 
         probs = torch.sigmoid(logits)
         avg_probs = probs[index].mean()
@@ -201,8 +245,12 @@ def binary_entropy(logits, selection_p, ois):
     else:
         with torch.no_grad():
             confidence = F.softmax(torch.abs(torch.sigmoid(logits) - 0.5) * 2, dim=0)
-            select, index = torch.topk(confidence, select_num-1 ,dim=0)
-            index = torch.cat([torch.Tensor([0]).to(index.device).long(), index], dim=0)
+            extra_select_num = max(0, select_num - 1)
+            if extra_select_num > 0:
+                select, index = torch.topk(confidence, extra_select_num, dim=0)
+            else:
+                index = torch.empty(0, dtype=torch.long, device=logits.device)
+            index = torch.cat([torch.tensor([0], device=index.device).long(), index], dim=0)
 
         probs = torch.sigmoid(logits)
         avg_probs = probs[index].mean()

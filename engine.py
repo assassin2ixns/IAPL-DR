@@ -7,6 +7,16 @@ import numpy as np
 import torch.distributed as dist
 from sklearn.metrics import average_precision_score, accuracy_score
 import os
+
+
+def extract_logits(outputs):
+    if isinstance(outputs, dict):
+        return outputs['logits']
+    if isinstance(outputs, (list, tuple)):
+        return outputs[0]
+    return outputs
+
+
 def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, 
                     optimizer: torch.optim.Optimizer, device: torch.device, 
                     epoch: int, lr_scheduler = None, max_norm: float = 0, args=None, model_ema=None):
@@ -53,6 +63,18 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
             model_ema.update(model)
             
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
+        if isinstance(outputs, dict) and getattr(args, 'dream_log_router', True):
+            q = outputs['q'].detach()
+            metric_logger.update(
+                dream_apply=outputs['apply'].detach().mean(),
+                dream_anchor_margin=(outputs['anchor_logits'].sigmoid() - 0.5).abs().mul(2.0).detach().mean(),
+            )
+            if q.shape[1] > 0:
+                metric_logger.update(dream_q_fine=q[:, 0].mean())
+            if q.shape[1] > 1:
+                metric_logger.update(dream_q_stable=q[:, 1].mean())
+            if q.shape[1] > 2:
+                metric_logger.update(dream_q_consensus=q[:, 2].mean())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
     # gather the stats from all processes
@@ -62,7 +84,7 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
 
 @torch.no_grad()
 def gather_together(data):
-    world_size = dist.get_world_size()
+    world_size = utils.get_world_size()
     if world_size < 2:
         return data
     dist.barrier()
@@ -88,6 +110,11 @@ def evaluate(model, data_loaders, device, args=None, test=False):
     test_ACC = []
     test_real_ACC = []
     test_fake_ACC = []
+    if (
+        getattr(args, 'method', 'iapl') == 'dream_cs'
+        and getattr(args, 'dream_eval_degradation', 'none') != 'none'
+    ):
+        print('DREAM-CS eval degradation: {}'.format(args.dream_eval_degradation))
 
     for data_name, data_loader in data_loaders.items():
         metric_logger = utils.MetricLogger(delimiter="  ")
@@ -101,11 +128,12 @@ def evaluate(model, data_loaders, device, args=None, test=False):
             
             outputs = model(images)
             
-            y_pred.extend(outputs.sigmoid().flatten().tolist())
+            logits = extract_logits(outputs)
+            y_pred.extend(logits.sigmoid().flatten().tolist())
             y_true.extend(labels.flatten().tolist())
         
         
-        world_size = dist.get_world_size()
+        world_size = utils.get_world_size()
         
         if world_size < 2:
             merge_y_true = y_true
