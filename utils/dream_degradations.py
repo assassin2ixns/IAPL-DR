@@ -115,7 +115,7 @@ def apply_named_degradation(x, name, dataset, quality=None):
     return normalize(out, dataset).to(dtype=dtype)
 
 
-def make_train_degradation_views(x, args):
+def make_train_degradation_views(x, args, return_names=True):
     num_views = max(0, int(getattr(args, 'dream_num_train_views', 0)))
     pool = [name for name in getattr(args, 'dream_degradation_pool', []) if name not in ['none', 'identity']]
     if len(pool) == 0:
@@ -125,7 +125,11 @@ def make_train_degradation_views(x, args):
     with torch.no_grad():
         for _ in range(num_views):
             name = random.choice(pool)
-            views.append(apply_named_degradation(x, name, args.dataset))
+            degraded = apply_named_degradation(x, name, args.dataset)
+            if return_names:
+                views.append({'name': name, 'image': degraded})
+            else:
+                views.append(degraded)
     return views
 
 
@@ -135,3 +139,12 @@ def make_eval_degradation(x, args):
         return x
     with torch.no_grad():
         return apply_named_degradation(x, name, args.dataset)
+
+
+def make_fixed_eval_degradations(x, args, names):
+    views = []
+    with torch.no_grad():
+        for name in names:
+            degraded = x if name == 'none' else apply_named_degradation(x, name, args.dataset)
+            views.append({'name': name, 'image': degraded})
+    return views

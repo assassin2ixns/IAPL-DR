@@ -56,7 +56,7 @@ def get_args_parser():
     parser.add_argument('--clip_max_norm', type=float, default=0.)
     parser.add_argument('--lr_drop', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.9)
-    parser.add_argument('--ema', type=bool, default=False)
+    parser.add_argument('--ema', type=str2bool, default=False)
 
     # adapter
     parser.add_argument('--vit_adapter_list', type=list, default=[3, 7, 11, 15, 19, 23])
@@ -64,6 +64,7 @@ def get_args_parser():
 
     # model
     parser.add_argument('--method', type=str, default='iapl', choices=['iapl', 'dream_cs'])
+    parser.add_argument('--model_variant', type=str, default='clip_adapter')
     parser.add_argument('--backbone', type=str, default='CLIP:ViT-L/14')
     parser.add_argument('--clip_path', type=str, default='/Path/to/ViT-L-14.pt')
 
@@ -74,14 +75,14 @@ def get_args_parser():
     parser.add_argument('--n_ctx', type=int, default=2)
     parser.add_argument('--ctx_init', type=str, default="a photo of a")
     parser.add_argument('--progress_alpha', type=float, default=0.1)
-    parser.add_argument('--condition', type=bool, default=False)
-    parser.add_argument('--gate', type=bool, default=False)
+    parser.add_argument('--condition', type=str2bool, default=False)
+    parser.add_argument('--gate', type=str2bool, default=False)
 
     # tta
-    parser.add_argument('--tta', type=bool, default=False)
+    parser.add_argument('--tta', type=str2bool, default=False)
     parser.add_argument('--tta_steps', type=int, default=1)
     parser.add_argument('--selection_p', type=float, default=0.2)
-    parser.add_argument('--ois', type=bool, default=False)
+    parser.add_argument('--ois', type=str2bool, default=False)
 
     # DREAM-CS
     parser.add_argument('--dream_num_experts', type=int, default=3)
@@ -89,40 +90,54 @@ def get_args_parser():
     parser.add_argument('--dream_rank', type=int, default=8)
     parser.add_argument('--dream_router_hidden', type=int, default=32)
     parser.add_argument('--dream_delta_clip', type=float, default=1.0)
-    parser.add_argument('--dream_apply_init_bias', type=float, default=-4.0)
+    parser.add_argument('--dream_residual_scale_init', type=float, default=1e-3)
+    parser.add_argument('--dream_apply_init_bias', type=float, default=-3.0)
     parser.add_argument('--dream_route_tau', type=float, default=0.5)
     parser.add_argument('--dream_route_margin', type=float, default=0.0)
     parser.add_argument('--dream_clean_safe_margin', type=float, default=0.0)
     parser.add_argument('--dream_num_train_views', type=int, default=2)
-    parser.add_argument('--dream_degradation_pool', nargs='+', default=['jpeg', 'resize', 'blur', 'quant', 'webp'])
+    parser.add_argument('--dream_degradation_pool', nargs='+', default=['jpeg90', 'jpeg75', 'jpeg50', 'resize', 'blur', 'quant', 'webp'])
     parser.add_argument('--dream_expert_forward_chunk', type=int, default=0)
     parser.add_argument('--dream_eval_degradation', type=str, default='none',
                         choices=['none', 'jpeg50', 'jpeg75', 'jpeg90', 'resize', 'blur', 'quant', 'webp'])
+    parser.add_argument('--dream_eval_multi_degradations', nargs='+', default=[])
     parser.add_argument('--dream_log_router', type=str2bool, default=True)
     parser.add_argument('--dream_disable_router', type=str2bool, default=False)
     parser.add_argument('--dream_disable_robust', type=str2bool, default=False)
     parser.add_argument('--dream_disable_clean_safe', type=str2bool, default=False)
     parser.add_argument('--dream_disable_route_loss', type=str2bool, default=False)
     parser.add_argument('--dream_disable_expert_correction', type=str2bool, default=False)
+    parser.add_argument('--dream_disable_expert_aux', type=str2bool, default=False)
+    parser.add_argument('--dream_disable_specialization', type=str2bool, default=False)
     parser.add_argument('--dream_anchor_ckpt', type=str, default='')
     parser.add_argument('--dream_freeze_anchor', type=str2bool, default=False)
+    parser.add_argument('--dream_warmup_epochs', type=int, default=1)
+    parser.add_argument('--dream_router_start_epoch', type=int, default=1)
+    parser.add_argument('--dream_apply_train_floor', type=float, default=0.05)
+    parser.add_argument('--dream_use_apply_floor', type=str2bool, default=True)
     parser.add_argument('--dream_tta_safe', type=str2bool, default=True)
     parser.add_argument('--dream_tta_agg', type=str, default='mean', choices=['confidence', 'mean', 'trimmed_mean'])
+    parser.add_argument('--dream_tta_disagreement_fallback', type=str2bool, default=True)
+    parser.add_argument('--dream_tta_disagreement_thresh', type=float, default=0.05)
 
     # loss
     parser.add_argument('--loss_adapter', type=float, default=1.0)
     parser.add_argument('--loss_contrast', type=float, default=1.0)
     parser.add_argument('--loss_condition', type=float, default=1.0)
-    parser.add_argument('--use_contrast', type=bool, default=False)
-    parser.add_argument('--smooth', type=bool, default=False)
+    parser.add_argument('--use_contrast', type=str2bool, default=False)
+    parser.add_argument('--smooth', type=str2bool, default=False)
     parser.add_argument('--loss_dream_clean', type=float, default=1.0)
-    parser.add_argument('--loss_dream_anchor', type=float, default=0.2)
+    parser.add_argument('--loss_dream_anchor', type=float, default=1.0)
+    parser.add_argument('--loss_dream_expert', type=float, default=0.2)
+    parser.add_argument('--loss_dream_specialize', type=float, default=0.2)
+    parser.add_argument('--loss_dream_anchor_rob', type=float, default=0.2)
     parser.add_argument('--loss_dream_rob', type=float, default=0.5)
     parser.add_argument('--loss_dream_inv', type=float, default=0.05)
     parser.add_argument('--loss_dream_route', type=float, default=0.1)
     parser.add_argument('--loss_dream_apply', type=float, default=0.05)
     parser.add_argument('--loss_dream_clean_safe', type=float, default=0.5)
     parser.add_argument('--loss_dream_res', type=float, default=0.01)
+    parser.add_argument('--loss_dream_div', type=float, default=0.005)
 
     # output
     parser.add_argument('--eval', action='store_true')
@@ -133,6 +148,7 @@ def get_args_parser():
     parser.add_argument('--save_checkpoint_interval', default=30, type=int)
     parser.add_argument('--model_name', type=str, default='CLIP_adapter')
     parser.add_argument('--print_freq', default=50, type=int)
+    parser.add_argument('--eval_max_batches_per_domain', default=0, type=int)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -146,6 +162,8 @@ def get_args_parser():
 
 def main(args):
     init_distributed_mode(args)
+    if getattr(args, 'method', 'iapl') == 'dream_cs' and getattr(args, 'dream_anchor_ckpt', ''):
+        print('WARNING: dream_anchor_ckpt is a plugin/warmstart ablation, not the DREAM-CS Standalone main setting.')
 
     # set device
     device = torch.device(args.device)
@@ -199,8 +217,7 @@ def main(args):
     
     if args.eval:
         checkpoint = torch.load(args.pretrained_model, map_location='cpu')
-        strict = getattr(args, 'method', 'iapl') != 'dream_cs'
-        model_without_ddp.load_state_dict(checkpoint['model'], strict=strict)
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
 
         if args.ema and ('model_ema' in checkpoint.keys()):
             model_ema.module.load_state_dict(checkpoint['model_ema'])

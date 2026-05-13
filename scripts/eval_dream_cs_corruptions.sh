@@ -6,6 +6,7 @@ DATASET=${DATASET:-UniversalFakeDetect}
 for DEG in none jpeg50 jpeg75 resize blur webp; do
     python main.py \
         --method dream_cs \
+        --model_variant clip_adapter \
         --eval \
         --pretrained_model "$CKPT" \
         --clip_path "$CLIP_PATH" \

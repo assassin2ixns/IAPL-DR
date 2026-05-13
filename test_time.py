@@ -40,6 +40,10 @@ def extract_logits(outputs):
     return outputs
 
 
+def extract_outputs_logits(outputs):
+    return extract_logits(outputs)
+
+
 def _strip_module_prefix(state_dict):
     if any(key.startswith('module.') for key in state_dict.keys()):
         return {
@@ -91,8 +95,7 @@ def testtime_main(args):
     checkpoint = torch.load(args.pretrained_model, map_location='cpu')
     state_dict = _strip_module_prefix(checkpoint['model'])
     m = unwrap_model(model)
-    strict = getattr(args, 'method', 'iapl') != 'dream_cs'
-    m.load_state_dict(state_dict, strict=strict)
+    m.load_state_dict(state_dict, strict=True)
 
     pretrained_ctx = state_dict.get('prompt_learner.ctx', None)
 
@@ -118,6 +121,8 @@ def testtime_main(args):
         print_freq = args.print_freq
 
         y_true, y_pred = [], []
+        tta_view_vars, tta_fallbacks, tta_selected_nums = [], [], []
+        tta_pred_vals, tta_anchor_fallback_vals = [], []
 
         for samples in metric_logger.log_every(data_loader, print_freq, header):
 
@@ -146,9 +151,21 @@ def testtime_main(args):
                     model.eval()
                     if args.ois:
                         selected_outputs = model(images[select_index])
-                        selected_logits = extract_logits(selected_outputs).flatten()
+                        selected_logits = extract_outputs_logits(selected_outputs).flatten()
                         if getattr(args, 'method', 'iapl') == 'dream_cs' and getattr(args, 'dream_tta_safe', True):
                             probs = selected_logits.sigmoid()
+                            view_var = probs.var(unbiased=False)
+                            fallback = False
+                            fallback_pred = probs.mean()
+                            if (
+                                getattr(args, 'dream_tta_disagreement_fallback', True)
+                                and bool((view_var > args.dream_tta_disagreement_thresh).detach().cpu().item())
+                                and isinstance(selected_outputs, dict)
+                            ):
+                                probs_anchor = selected_outputs['anchor_logits'].sigmoid().flatten()
+                                fallback_pred = probs_anchor.mean()
+                                probs = probs_anchor
+                                fallback = True
                             if args.dream_tta_agg == 'confidence':
                                 conf_idx = torch.max(torch.abs(probs - 0.5), dim=0)[1]
                                 pred = probs[conf_idx].view(1)
@@ -160,12 +177,17 @@ def testtime_main(args):
                                     pred = probs.mean().view(1)
                             else:
                                 pred = probs.mean().view(1)
+                            tta_view_vars.append(float(view_var.detach().cpu()))
+                            tta_fallbacks.append(float(fallback))
+                            tta_selected_nums.append(float(len(select_index)))
+                            tta_pred_vals.append(float(pred.detach().cpu().view(-1)[0]))
+                            tta_anchor_fallback_vals.append(float(fallback_pred.detach().cpu()))
                         else:
                             preds = selected_logits.sigmoid()
                             conf_idx = torch.max(torch.abs(preds - 0.5), dim=0)[1]
                             pred = preds[conf_idx].view(1)
                     else:
-                        pred = extract_logits(model(image)).sigmoid()
+                        pred = extract_outputs_logits(model(image)).sigmoid()
 
             y_pred.extend(pred.flatten().tolist())
             y_true.extend(labels.flatten().tolist())
@@ -198,6 +220,15 @@ def testtime_main(args):
         test_fake_ACC.append(f_acc)
 
         print("({}) acc: {:.2f}; ap: {:.2f}; racc: {:.2f}; facc: {:.2f};".format(data_name, acc*100, ap*100, r_acc*100, f_acc*100))
+        if getattr(args, 'method', 'iapl') == 'dream_cs' and getattr(args, 'dream_tta_safe', True) and len(tta_view_vars) > 0:
+            print("[DREAM-TTA] domain={} view_prob_var={:.6f} fallback_rate={:.4f} selected_views={:.2f} pred_mean={:.4f} anchor_fallback_pred_mean={:.4f}".format(
+                data_name,
+                float(np.mean(tta_view_vars)),
+                float(np.mean(tta_fallbacks)),
+                float(np.mean(tta_selected_nums)),
+                float(np.mean(tta_pred_vals)),
+                float(np.mean(tta_anchor_fallback_vals)),
+            ))
 
     output_strs = []
     for idx, [name, ap, acc, racc, facc] in enumerate(zip(test_dataset + ["mean"], test_AP + [np.mean(test_AP)], test_ACC + [np.mean(test_ACC)], test_real_ACC + [np.mean(test_real_ACC)], test_fake_ACC + [np.mean(test_fake_ACC)])):
@@ -217,7 +248,7 @@ def test_time_tuning(model, inputs, optimizer, scaler, args):
         with sync_context:  # 多卡时梯度不进行聚合，各卡独立进行参数更新
             
             outputs = model(inputs)
-            logits = extract_logits(outputs).flatten()
+            logits = extract_outputs_logits(outputs).flatten()
             loss, index = binary_entropy(logits, args.selection_p, args.ois)
 
             optimizer.zero_grad()

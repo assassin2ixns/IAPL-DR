@@ -3,6 +3,7 @@ python -m torch.distributed.launch \
     --master_port 29584 \
     main.py \
     --method dream_cs \
+    --model_variant clip_adapter \
     --batchsize 8 \
     --evalbatchsize 32 \
     --clip_path "/path/to/ViT-L-14.pt" \
@@ -21,7 +22,9 @@ python -m torch.distributed.launch \
     --tta_steps 2 \
     --ois True \
     --dream_tta_safe True \
-    --dream_tta_agg mean
+    --dream_tta_agg mean \
+    --dream_tta_disagreement_fallback True \
+    --dream_tta_disagreement_thresh 0.05
 
 # Safe TTA freezes router, expert residuals, fc_binary, conditional_ctx, and adapters;
 # only prompt_learner.ctx is optimized for each test image.
