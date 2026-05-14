@@ -1,6 +1,7 @@
 import math
 import sys
 import time
+from itertools import islice
 from typing import Iterable
 
 import numpy as np
@@ -28,6 +29,11 @@ from utils.dream_logging import (
     write_diagnosis_summary,
 )
 
+try:
+    from tqdm.auto import tqdm
+except Exception:
+    tqdm = None
+
 
 def unwrap_model(model):
     return model.module if hasattr(model, 'module') else model
@@ -43,6 +49,42 @@ def extract_logits(outputs):
 
 def extract_logits_flat(outputs):
     return extract_logits(outputs).view(-1)
+
+
+def _progress_enabled():
+    return utils.is_main_process() and tqdm is not None and sys.stderr.isatty()
+
+
+def _make_progress(iterable, total=None, desc='', leave=True):
+    if _progress_enabled():
+        return tqdm(iterable, total=total, desc=desc, dynamic_ncols=True, leave=leave)
+    return iterable
+
+
+def _progress_postfix(progress, values):
+    if not hasattr(progress, 'set_postfix'):
+        return
+    clean = {}
+    for key, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, torch.Tensor):
+            value = value.detach().float().mean().cpu().item()
+        if isinstance(value, (float, np.floating)):
+            if math.isfinite(float(value)):
+                clean[key] = '{:.4g}'.format(float(value))
+            else:
+                clean[key] = str(value)
+        else:
+            clean[key] = value
+    progress.set_postfix(clean, refresh=False)
+
+
+def _console_print(message):
+    if _progress_enabled():
+        tqdm.write(message)
+    else:
+        print(message)
 
 
 @torch.no_grad()
@@ -68,7 +110,7 @@ def _print_train_line(epoch, iteration, record):
             msg.append('{}={:.5g}'.format(key, value))
         else:
             msg.append('{}={}'.format(key, value))
-    print('[TRAIN] ' + ' '.join(msg))
+    _console_print('[TRAIN] ' + ' '.join(msg))
 
 
 def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
@@ -90,7 +132,13 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
     amp_dtype = torch.bfloat16 if getattr(args, 'amp_dtype', 'bf16') == 'bf16' else torch.float16
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and getattr(args, 'amp_dtype', 'bf16') == 'fp16')
 
-    for iteration, samples in enumerate(data_loader):
+    try:
+        train_total = len(data_loader)
+    except TypeError:
+        train_total = None
+    progress = _make_progress(data_loader, total=train_total, desc='Train epoch {}'.format(epoch), leave=True)
+
+    for iteration, samples in enumerate(progress):
         data_time = time.time() - end
         batch_start = time.time()
         images, labels = [sample.to(device, non_blocking=True) for sample in samples]
@@ -144,9 +192,24 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
             if utils.is_main_process() and (iteration % print_freq == 0):
                 write_jsonl(args.output_dir, 'train_iter_metrics.jsonl', record)
                 _print_train_line(epoch, iteration, record)
+                _progress_postfix(progress, {
+                    'loss': record.get('loss_total'),
+                    'acc': record.get('train_acc_final'),
+                    'racc': record.get('train_racc_final'),
+                    'facc': record.get('train_facc_final'),
+                    'apply': record.get('apply_eff_mean', record.get('apply_mean')),
+                    'qH': record.get('q_entropy_mean'),
+                    'corr': record.get('correction_abs_mean'),
+                    'cavr': record.get('cavr'),
+                    'active': record.get('active_rate'),
+                })
         elif utils.is_main_process() and iteration % print_freq == 0:
-            print('[TRAIN] epoch={} iter={} loss_total={:.5g} lr={:.5g}'.format(
+            _console_print('[TRAIN] epoch={} iter={} loss_total={:.5g} lr={:.5g}'.format(
                 epoch, iteration, loss_value, optimizer.param_groups[0]['lr']))
+            _progress_postfix(progress, {
+                'loss': loss_value,
+                'lr': optimizer.param_groups[0]['lr'],
+            })
 
         if scaler.is_enabled():
             scaler.step(optimizer)
@@ -162,7 +225,7 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
         write_jsonl(args.output_dir, 'train_epoch_metrics.jsonl', epoch_record)
         if utils.is_main_process():
             elapsed = time.time() - header_start
-            print('[TRAIN-EPOCH] epoch={} elapsed_sec={:.1f} loss_total={:.5g} acc_final={:.4f} apply={:.4f} q_entropy={:.4f}'.format(
+            _console_print('[TRAIN-EPOCH] epoch={} elapsed_sec={:.1f} loss_total={:.5g} acc_final={:.4f} apply={:.4f} q_entropy={:.4f}'.format(
                 epoch,
                 elapsed,
                 epoch_record.get('loss_total', float('nan')),
@@ -185,11 +248,30 @@ def _evaluate_iapl(model, data_loaders, device, args=None, degradation_name='non
     model.eval()
     test_dataset, test_ap, test_acc, test_racc, test_facc = [], [], [], [], []
     output_strs = []
-    for data_name, data_loader in data_loaders.items():
+    domain_items = list(data_loaders.items())
+    domain_progress = _make_progress(domain_items, total=len(domain_items), desc='Eval domains', leave=True)
+    for data_name, data_loader in domain_progress:
+        _progress_postfix(domain_progress, {'domain': data_name, 'deg': degradation_name})
         y_true, y_pred = [], []
-        for batch_idx, samples in enumerate(data_loader):
-            if getattr(args, 'eval_max_batches_per_domain', -1) > 0 and batch_idx >= args.eval_max_batches_per_domain:
-                break
+        max_batches = getattr(args, 'eval_max_batches_per_domain', -1)
+        try:
+            batch_total = len(data_loader)
+        except TypeError:
+            batch_total = None
+        batch_iterable = data_loader
+        if max_batches > 0:
+            batch_iterable = islice(data_loader, max_batches)
+            if batch_total is not None:
+                batch_total = min(batch_total, max_batches)
+            else:
+                batch_total = max_batches
+        batch_progress = _make_progress(
+            batch_iterable,
+            total=batch_total,
+            desc='Eval {}:{}'.format(degradation_name, data_name),
+            leave=False,
+        )
+        for batch_idx, samples in enumerate(batch_progress):
             images, labels = [sample.to(device, non_blocking=True) for sample in samples]
             outputs = model(images)
             probs = extract_logits(outputs).sigmoid().flatten()
@@ -207,7 +289,12 @@ def _evaluate_iapl(model, data_loaders, device, args=None, degradation_name='non
         test_racc.append(metrics['racc'])
         test_facc.append(metrics['facc'])
         if utils.is_main_process():
-            print("({}) acc: {:.2f}; ap: {:.2f}; racc: {:.2f}; facc: {:.2f};".format(
+            _progress_postfix(domain_progress, {
+                'domain': data_name,
+                'acc': metrics['acc'],
+                'ap': metrics['ap'],
+            })
+            _console_print("({}) acc: {:.2f}; ap: {:.2f}; racc: {:.2f}; facc: {:.2f};".format(
                 data_name, metrics['acc'] * 100, metrics['ap'] * 100, metrics['racc'] * 100, metrics['facc'] * 100))
 
     names = test_dataset + ['mean']
@@ -220,7 +307,7 @@ def _evaluate_iapl(model, data_loaders, device, args=None, degradation_name='non
             idx, name, acc * 100, ap * 100, racc * 100, facc * 100)
         output_strs.append(s)
         if utils.is_main_process():
-            print(s)
+            _console_print(s)
     return '; '.join(output_strs), np.nanmean(test_ap), np.nanmean(test_acc), {}
 
 
