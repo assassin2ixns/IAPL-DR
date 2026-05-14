@@ -321,18 +321,42 @@ def _evaluate_dream_once(model, data_loaders, device, args=None, degradation_nam
         args.dream_eval_degradation = degradation_name
     ensure_output_dirs(args.output_dir)
     if utils.is_main_process() and degradation != 'none':
-        print('[EVAL-DEG] degradation={}'.format(degradation))
+        _console_print('[EVAL-DEG] degradation={}'.format(degradation))
 
     domain_records = []
     output_strs = []
     test_ap, test_acc = [], []
 
-    for data_name, data_loader in data_loaders.items():
+    domain_items = list(data_loaders.items())
+    domain_progress = _make_progress(
+        domain_items,
+        total=len(domain_items),
+        desc='DREAM eval {}'.format(degradation),
+        leave=True,
+    )
+    for data_name, data_loader in domain_progress:
+        _progress_postfix(domain_progress, {'domain': data_name, 'deg': degradation})
         local_rows = []
         sample_base = 0
-        for batch_idx, samples in enumerate(data_loader):
-            if getattr(args, 'eval_max_batches_per_domain', -1) > 0 and batch_idx >= args.eval_max_batches_per_domain:
-                break
+        max_batches = getattr(args, 'eval_max_batches_per_domain', -1)
+        try:
+            batch_total = len(data_loader)
+        except TypeError:
+            batch_total = None
+        batch_iterable = data_loader
+        if max_batches > 0:
+            batch_iterable = islice(data_loader, max_batches)
+            if batch_total is not None:
+                batch_total = min(batch_total, max_batches)
+            else:
+                batch_total = max_batches
+        batch_progress = _make_progress(
+            batch_iterable,
+            total=batch_total,
+            desc='DREAM eval {}:{}'.format(degradation, data_name),
+            leave=False,
+        )
+        for batch_idx, samples in enumerate(batch_progress):
             images, labels = [sample.to(device, non_blocking=True) for sample in samples]
             outputs = model(images)
             if not isinstance(outputs, dict):
@@ -392,22 +416,28 @@ def _evaluate_dream_once(model, data_loaders, device, args=None, degradation_nam
                 domain_record.get('final_facc', np.nan) * 100,
             )
             output_strs.append(s)
-            print(s)
-            print("[DREAM-EVAL] domain={} deg={} final acc={:.2f} ap={:.2f} racc={:.2f} facc={:.2f}".format(
+            _progress_postfix(domain_progress, {
+                'domain': data_name,
+                'acc': domain_record.get('final_acc', np.nan),
+                'ap': domain_record.get('final_ap', np.nan),
+                'apply': domain_record.get('apply_mean', np.nan),
+            })
+            _console_print(s)
+            _console_print("[DREAM-EVAL] domain={} deg={} final acc={:.2f} ap={:.2f} racc={:.2f} facc={:.2f}".format(
                 data_name, degradation,
                 domain_record.get('final_acc', np.nan) * 100,
                 domain_record.get('final_ap', np.nan) * 100,
                 domain_record.get('final_racc', np.nan) * 100,
                 domain_record.get('final_facc', np.nan) * 100,
             ))
-            print("[DREAM-EVAL] domain={} deg={} anchor acc={:.2f} ap={:.2f} racc={:.2f} facc={:.2f}".format(
+            _console_print("[DREAM-EVAL] domain={} deg={} anchor acc={:.2f} ap={:.2f} racc={:.2f} facc={:.2f}".format(
                 data_name, degradation,
                 domain_record.get('anchor_acc', np.nan) * 100,
                 domain_record.get('anchor_ap', np.nan) * 100,
                 domain_record.get('anchor_racc', np.nan) * 100,
                 domain_record.get('anchor_facc', np.nan) * 100,
             ))
-            print("[DREAM-EVAL] domain={} deg={} cavr={:.4f} help={:.4f} harm={:.4f} apply={:.4f} q=[{:.4f},{:.4f},{:.4f}] corr={:.4f}".format(
+            _console_print("[DREAM-EVAL] domain={} deg={} cavr={:.4f} help={:.4f} harm={:.4f} apply={:.4f} q=[{:.4f},{:.4f},{:.4f}] corr={:.4f}".format(
                 data_name, degradation,
                 domain_record.get('cavr', np.nan),
                 domain_record.get('help_rate', np.nan),
@@ -430,7 +460,7 @@ def _evaluate_dream_once(model, data_loaders, device, args=None, degradation_nam
             mean_record.get('mean_racc_final', np.nan) * 100,
             mean_record.get('mean_facc_final', np.nan) * 100,
         ))
-        print("[DREAM-EVAL-MEAN] deg={} final_acc={:.2f} final_ap={:.2f} anchor_acc={:.2f} anchor_ap={:.2f} cavr={:.4f} help={:.4f} harm={:.4f} apply={:.4f}".format(
+        _console_print("[DREAM-EVAL-MEAN] deg={} final_acc={:.2f} final_ap={:.2f} anchor_acc={:.2f} anchor_ap={:.2f} cavr={:.4f} help={:.4f} harm={:.4f} apply={:.4f}".format(
             degradation,
             mean_record.get('mean_acc_final', np.nan) * 100,
             mean_record.get('mean_ap_final', np.nan) * 100,
@@ -461,7 +491,9 @@ def evaluate(model, data_loaders, device, args=None, test=False):
     if len(multi) > 0:
         outputs = []
         per_deg = {}
-        for name in multi:
+        deg_progress = _make_progress(multi, total=len(multi), desc='Eval degradations', leave=True)
+        for name in deg_progress:
+            _progress_postfix(deg_progress, {'deg': name})
             output_strs, cur_ap, cur_acc, mean_record = _evaluate_dream_once(
                 model, data_loaders, device, args=args, degradation_name=name)
             outputs.append('[{}] {}'.format(name, output_strs))
