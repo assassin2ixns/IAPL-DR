@@ -12,6 +12,7 @@ from utils.dataset import Dataset_Creator, Dataset_Creator_GenImage, Dataset_Cre
 from torch.utils.data import DataLoader, DistributedSampler, RandomSampler, SequentialSampler
 from torch.optim.lr_scheduler import OneCycleLR
 from engine import train_one_epoch, evaluate
+from utils.dream_logging import write_diagnosis_summary, write_jsonl, write_startup_sanity
 from models import build_model
 import pdb
 from test_time import testtime_main
@@ -119,6 +120,7 @@ def get_args_parser():
     parser.add_argument('--dream_tta_agg', type=str, default='mean', choices=['confidence', 'mean', 'trimmed_mean'])
     parser.add_argument('--dream_tta_disagreement_fallback', type=str2bool, default=True)
     parser.add_argument('--dream_tta_disagreement_thresh', type=float, default=0.05)
+    parser.add_argument('--dream_save_pred_csv', type=str2bool, default=True)
 
     # loss
     parser.add_argument('--loss_adapter', type=float, default=1.0)
@@ -144,7 +146,7 @@ def get_args_parser():
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--pretrained_model', type=str, default="")
     parser.add_argument('--num_workers', default=0, type=int)
-    parser.add_argument('--output_dir', default= 'results')
+    parser.add_argument('--output_dir', default='outputs')
     parser.add_argument('--save_checkpoint_interval', default=30, type=int)
     parser.add_argument('--model_name', type=str, default='CLIP_adapter')
     parser.add_argument('--print_freq', default=50, type=int)
@@ -164,6 +166,12 @@ def main(args):
     init_distributed_mode(args)
     if getattr(args, 'method', 'iapl') == 'dream_cs' and getattr(args, 'dream_anchor_ckpt', ''):
         print('WARNING: dream_anchor_ckpt is a plugin/warmstart ablation, not the DREAM-CS Standalone main setting.')
+
+    if args.output_dir:
+        if os.path.basename(os.path.normpath(args.output_dir)) != args.model_name:
+            args.output_dir = os.path.join(args.output_dir, args.model_name)
+        os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = Path(args.output_dir)
 
     # set device
     device = torch.device(args.device)
@@ -214,10 +222,13 @@ def main(args):
         print('-----------use EMA train mode----------')
     else:
         model_ema = None
+
+    write_startup_sanity(args, model_without_ddp)
     
     if args.eval:
         checkpoint = torch.load(args.pretrained_model, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
+        args.current_epoch = checkpoint.get('epoch', 'eval')
 
         if args.ema and ('model_ema' in checkpoint.keys()):
             model_ema.module.load_state_dict(checkpoint['model_ema'])
@@ -226,6 +237,7 @@ def main(args):
             evaluate(model_ema.module, data_loader_vals, device, args=args)
         else:
             evaluate(model, data_loader_vals, device, args=args)
+        write_diagnosis_summary(args.output_dir, args)
         exit()
     
     # DATA LOADER
@@ -265,12 +277,6 @@ def main(args):
             lr_scheduler.step(lr_scheduler.last_epoch)
             args.start_epoch = checkpoint['epoch'] + 1
 
-    # OUTPUT
-    if args.output_dir:
-        args.output_dir = os.path.join(args.output_dir, args.model_name)
-        os.makedirs(args.output_dir, exist_ok=True)
-    output_dir = Path(args.output_dir)
-
     best_ap = 0
     best_acc = 0
     for epoch in range(args.start_epoch, args.epoch):
@@ -282,7 +288,11 @@ def main(args):
         lr_scheduler.step()
         
         if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
+            checkpoint_paths = [
+                output_dir / 'checkpoint.pth',
+                output_dir / 'checkpoint_last.pth',
+                output_dir / f'checkpoint_epoch_{epoch}.pth',
+            ]
 
             if (epoch + 1) % args.save_checkpoint_interval == 0:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
@@ -302,6 +312,7 @@ def main(args):
         epoch_time_str = str(datetime.timedelta(seconds=int(epoch_time)))
         print('Epoch training time {}'.format(epoch_time_str))
         
+        args.current_epoch = epoch
         if args.ema:
             output_strs, cur_ap, cur_acc = evaluate(model_ema.module, data_loader_vals, device, args=args)
         else:
@@ -325,6 +336,23 @@ def main(args):
                 if model_ema:
                     weights['model_ema'] = get_state_dict(model_ema)
                 save_on_master(weights, checkpoint_path)
+                write_jsonl(args.output_dir, 'warning_flags.jsonl', {
+                    'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+                    'epoch': epoch,
+                    'iter': None,
+                    'global_step': None,
+                    'split': 'checkpoint',
+                    'domain': 'mean',
+                    'degradation': getattr(args, 'dream_eval_degradation', 'none'),
+                    'seed': getattr(args, 'seed', None),
+                    'model_name': getattr(args, 'model_name', None),
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'batch_size': None,
+                    'warning': 'test_domain_checkpoint_selection',
+                    'message': 'WARNING: checkpoint_best_ap uses evaluation domains and should not be used for final paper selection.',
+                    'metric': 'ap',
+                    'value': cur_ap,
+                })
             
             if cur_acc > best_acc:
                 best_acc = cur_acc
@@ -339,6 +367,25 @@ def main(args):
                 if model_ema:
                     weights['model_ema'] = get_state_dict(model_ema)
                 save_on_master(weights, checkpoint_path)
+                write_jsonl(args.output_dir, 'warning_flags.jsonl', {
+                    'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+                    'epoch': epoch,
+                    'iter': None,
+                    'global_step': None,
+                    'split': 'checkpoint',
+                    'domain': 'mean',
+                    'degradation': getattr(args, 'dream_eval_degradation', 'none'),
+                    'seed': getattr(args, 'seed', None),
+                    'model_name': getattr(args, 'model_name', None),
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'batch_size': None,
+                    'warning': 'test_domain_checkpoint_selection',
+                    'message': 'WARNING: checkpoint_best_acc uses evaluation domains and should not be used for final paper selection.',
+                    'metric': 'acc',
+                    'value': cur_acc,
+                })
+
+    write_diagnosis_summary(args.output_dir, args)
 
 
 if __name__ == "__main__":    

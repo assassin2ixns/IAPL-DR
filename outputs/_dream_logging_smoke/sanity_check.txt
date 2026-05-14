@@ -1,0 +1,14 @@
+DREAM-CS Standalone sanity check
+
+method_is_dream_cs: True
+standalone_no_dream_anchor_ckpt: True
+dream_freeze_anchor_false: True
+dream_residual_scale_init_positive: True
+clean_safe_uses_detached_anchor_reference: True
+route_target_detaches_anchor_and_expert_ce: True
+experts_share_fc_binary_no_independent_head: True
+router_low_dim_statistics_only: True
+tta_false_for_training: True
+label_convention: real=0, fake=1; RAcc uses label==0 and FAcc uses label==1
+
+Train degradation uses GPU tensor jpeg-like/webp-like approximation, not real codecs.

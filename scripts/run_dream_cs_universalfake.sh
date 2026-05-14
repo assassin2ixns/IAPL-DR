@@ -1,4 +1,29 @@
-python -m torch.distributed.launch \
+DATASET_PATH=${DATASET_PATH:-/data2/caiguoqing/Datasets/UniversalFakeDetect}
+CLIP_PATH=${CLIP_PATH:-/data2/caiguoqing/clip_weights/ViT-L-14.pt}
+PYTHON=${PYTHON:-/data2/caiguoqing/.conda/envs/iapl/bin/python}
+TRAIN_SELECTED_SUBSETS=${TRAIN_SELECTED_SUBSETS:-"car cat chair horse"}
+
+# This local UniversalFakeDetect path points test/ to CNN_synth_testset.
+# It does not contain dalle/glide/guided/ldm domains.
+TEST_SELECTED_SUBSETS=${TEST_SELECTED_SUBSETS:-"crn cyclegan biggan deepfake gaugan imle progan san seeingdark stargan stylegan stylegan2 whichfaceisreal"}
+
+for subset in ${TRAIN_SELECTED_SUBSETS}; do
+    if [ ! -d "${DATASET_PATH}/train/${subset}" ]; then
+        echo "Missing train subset: ${DATASET_PATH}/train/${subset}" >&2
+        exit 1
+    fi
+done
+
+for subset in ${TEST_SELECTED_SUBSETS}; do
+    if [ ! -d "${DATASET_PATH}/test/${subset}" ]; then
+        echo "Missing test subset: ${DATASET_PATH}/test/${subset}" >&2
+        echo "Available test subsets:" >&2
+        find -L "${DATASET_PATH}/test" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | sort >&2
+        exit 1
+    fi
+done
+
+"${PYTHON}" -m torch.distributed.launch \
     --nproc_per_node=1 \
     --master_port 29582 \
     main.py \
@@ -6,11 +31,11 @@ python -m torch.distributed.launch \
     --model_variant clip_adapter \
     --batchsize 8 \
     --evalbatchsize 32 \
-    --clip_path "/path/to/ViT-L-14.pt" \
-    --dataset_path "/path/to/dataset" \
+    --clip_path "${CLIP_PATH}" \
+    --dataset_path "${DATASET_PATH}" \
     --dataset UniversalFakeDetect \
-    --train_selected_subsets 'car' 'cat' 'chair' 'horse' \
-    --test_selected_subsets 'crn' 'cyclegan' 'dalle' 'biggan' 'deepfake' 'gaugan' 'glide_50_27' 'glide_100_10' 'glide_100_27' 'guided' 'imle' 'ldm_100' 'ldm_200' 'ldm_200_cfg' 'progan' 'san' 'seeingdark' 'stargan' 'stylegan' \
+    --train_selected_subsets ${TRAIN_SELECTED_SUBSETS} \
+    --test_selected_subsets ${TEST_SELECTED_SUBSETS} \
     --lr 0.00005 \
     --model_name dream_cs_standalone_ufd_progan_v03 \
     --epoch 5 \
@@ -27,6 +52,7 @@ python -m torch.distributed.launch \
     --dream_num_train_views 2 \
     --dream_expert_forward_chunk 16 \
     --dream_log_router True \
+    --dream_save_pred_csv True \
     --loss_dream_clean 1.0 \
     --loss_dream_anchor 1.0 \
     --loss_dream_expert 0.2 \
