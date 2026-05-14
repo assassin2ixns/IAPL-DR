@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-DATASET_PATH=${DATASET_PATH:-/data2/caiguoqing/Datasets/UniversalFakeDetect}
+DEFAULT_DATASET_PATH=/data2/caiguoqing/Datasets/UniversalFakeDetect_full
+if [ ! -d "${DEFAULT_DATASET_PATH}/test/dalle" ]; then
+    DEFAULT_DATASET_PATH=/data2/caiguoqing/Datasets/UniversalFakeDetect
+fi
+DATASET_PATH=${DATASET_PATH:-${DEFAULT_DATASET_PATH}}
 CLIP_PATH=${CLIP_PATH:-/data2/caiguoqing/clip_weights/ViT-L-14.pt}
 PYTHON=${PYTHON:-/data2/caiguoqing/.conda/envs/iapl/bin/python}
 BATCHSIZE=${BATCHSIZE:-8}
@@ -11,10 +15,12 @@ LR=${LR:-0.00005}
 PRINT_FREQ=${PRINT_FREQ:-50}
 TRAIN_SELECTED_SUBSETS=${TRAIN_SELECTED_SUBSETS:-"car cat chair horse"}
 
-# This local UniversalFakeDetect path points test/ to CNN_synth_testset.
-# It does not contain dalle/glide/guided/ldm domains, so keep the default
-# subset list matched to the directories that are actually present.
-TEST_SELECTED_SUBSETS=${TEST_SELECTED_SUBSETS:-"crn cyclegan biggan deepfake gaugan imle progan san seeingdark stargan stylegan stylegan2 whichfaceisreal"}
+if [ -d "${DATASET_PATH}/test/dalle" ]; then
+    TEST_SELECTED_SUBSETS=${TEST_SELECTED_SUBSETS:-"crn cyclegan dalle biggan deepfake gaugan glide_50_27 glide_100_10 glide_100_27 guided imle ldm_100 ldm_200 ldm_200_cfg progan san seeingdark stargan stylegan"}
+else
+    # Legacy local CNN_synth_testset subset.
+    TEST_SELECTED_SUBSETS=${TEST_SELECTED_SUBSETS:-"crn cyclegan biggan deepfake gaugan imle progan san seeingdark stargan stylegan stylegan2 whichfaceisreal"}
+fi
 
 for subset in ${TRAIN_SELECTED_SUBSETS}; do
     if [ ! -d "${DATASET_PATH}/train/${subset}" ]; then

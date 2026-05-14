@@ -376,6 +376,36 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
     record['batch_time'] = batch_time
     record['max_gpu_mem_mb'] = float(torch.cuda.max_memory_allocated() / 1024.0 / 1024.0) if torch.cuda.is_available() else 0.0
     record['nan_or_inf_flag'] = bool(nan_flag or (not math.isfinite(loss_total)))
+    record['dream_fast_mode'] = outputs.get('fast_mode', getattr(args, 'dream_fast_mode', 'off'))
+    record['dream_fast_readout'] = outputs.get('fast_readout', getattr(args, 'dream_fast_readout', 'batchfold'))
+    record['dream_anchor_purity'] = outputs.get('anchor_purity', 'pure_anchor')
+    for src_key, dst_key in [
+        ('encoder_calls', 'dream_encoder_calls'),
+        ('encoder_calls_expected', 'dream_encoder_calls_expected'),
+        ('prompt_bank_len', 'dream_prompt_bank_len'),
+        ('effective_encoder_multiplier', 'dream_effective_encoder_multiplier'),
+    ]:
+        value = outputs.get(src_key, None)
+        if torch.is_tensor(value):
+            record[dst_key] = float(value.detach().float().cpu().item())
+        elif value is not None:
+            record[dst_key] = float(value)
+    scale = outputs.get('fast_prompt_delta_scale', None)
+    if scale is not None:
+        scale = to_numpy(scale).reshape(-1)
+        record['dream_fast_prompt_delta_scale_mean'] = safe_mean(scale)
+        for idx in range(min(3, scale.shape[0])):
+            record[f'dream_fast_prompt_delta_scale_e{idx}'] = float(scale[idx])
+    prompt_delta_norm = outputs.get('prompt_delta_norm_per_expert', None)
+    if prompt_delta_norm is not None:
+        prompt_delta_norm = to_numpy(prompt_delta_norm).reshape(-1)
+        for idx in range(min(3, prompt_delta_norm.shape[0])):
+            record[f'dream_prompt_delta_norm_e{idx}'] = float(prompt_delta_norm[idx])
+    prompt_delta_logit = outputs.get('prompt_delta_logit_per_expert', None)
+    if prompt_delta_logit is not None:
+        prompt_delta_logit = to_numpy(prompt_delta_logit).reshape(-1)
+        for idx in range(min(3, prompt_delta_logit.shape[0])):
+            record[f'dream_prompt_delta_logit_e{idx}'] = float(prompt_delta_logit[idx])
     clean_loss = abs(record.get('loss_dream_clean', 0.0)) + EPS
     record['ratio_rob_to_clean'] = record.get('loss_dream_rob', 0.0) / clean_loss
     record['ratio_clean_safe_to_clean'] = record.get('loss_dream_clean_safe', 0.0) / clean_loss
@@ -671,6 +701,7 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
 
 def concise_console_record(record):
     keys = [
+        'dream_fast_mode', 'dream_encoder_calls',
         'loss_total', 'lr', 'train_acc_final', 'train_acc_anchor',
         'train_racc_final', 'train_facc_final', 'apply_eff_mean',
         'q_entropy_mean', 'correction_abs_mean', 'cavr', 'help_rate',
@@ -804,6 +835,8 @@ def domain_metrics_from_rows(args, rows, epoch, domain, degradation):
     p_anchor = np.asarray([r['p_anchor'] for r in rows], dtype=np.float64)
     record = base_record(args, epoch, None, None, 'eval_domain', domain, degradation,
                          batch_size=len(rows))
+    record['dream_fast_mode'] = getattr(args, 'dream_fast_mode', 'off')
+    record['dream_fast_readout'] = getattr(args, 'dream_fast_readout', 'batchfold')
     record.update(binary_metrics(y, p_final, 'final'))
     record.update(binary_metrics(y, p_anchor, 'anchor'))
     for e in range(3):

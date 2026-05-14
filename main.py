@@ -120,7 +120,18 @@ def get_args_parser():
     parser.add_argument('--dream_tta_agg', type=str, default='mean', choices=['confidence', 'mean', 'trimmed_mean'])
     parser.add_argument('--dream_tta_disagreement_fallback', type=str2bool, default=True)
     parser.add_argument('--dream_tta_disagreement_thresh', type=float, default=0.05)
-    parser.add_argument('--dream_save_pred_csv', type=str2bool, default=True)
+    parser.add_argument('--dream_fast_mode', type=str, default='off',
+                        choices=['off', 'bank_plus_anchor', 'single_bank'])
+    parser.add_argument('--dream_fast_readout', type=str, default='delta_from_prompt',
+                        choices=['delta_from_prompt', 'prompt_direct', 'cls_plus_prompt'])
+    parser.add_argument('--dream_fast_prompt_delta_norm', type=str2bool, default=True)
+    parser.add_argument('--dream_fast_prompt_delta_scale_init', type=float, default=0.1)
+    parser.add_argument('--dream_fast_deep_bank', type=str2bool, default=True)
+    parser.add_argument('--dream_fast_deep_residual', type=str2bool, default=True)
+    parser.add_argument('--dream_fast_return_prompt_tokens', type=str2bool, default=True)
+    parser.add_argument('--dream_fast_compare_batchfold', type=str2bool, default=False)
+    parser.add_argument('--dream_fast_log_shapes', type=str2bool, default=True)
+    parser.add_argument('--dream_save_pred_csv', type=str2bool, default=False)
 
     # loss
     parser.add_argument('--loss_adapter', type=float, default=1.0)
@@ -150,7 +161,13 @@ def get_args_parser():
     parser.add_argument('--save_checkpoint_interval', default=30, type=int)
     parser.add_argument('--model_name', type=str, default='CLIP_adapter')
     parser.add_argument('--print_freq', default=50, type=int)
-    parser.add_argument('--eval_max_batches_per_domain', default=0, type=int)
+    parser.add_argument('--eval_interval', default=1, type=int)
+    parser.add_argument('--eval_first_epoch', type=str2bool, default=True)
+    parser.add_argument('--full_eval_last_epoch', type=str2bool, default=True)
+    parser.add_argument('--eval_max_batches_per_domain', default=-1, type=int)
+    parser.add_argument('--eval_selected_subsets_dev', nargs='+', default=[])
+    parser.add_argument('--amp', type=str2bool, default=False)
+    parser.add_argument('--amp_dtype', type=str, default='bf16', choices=['fp16', 'bf16'])
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -210,6 +227,23 @@ def main(args):
         else:
             sampler_val = SequentialSampler(dataset_val)
         data_loader_vals[selected_subset] = DataLoader(dataset_val, args.evalbatchsize, sampler=sampler_val, drop_last=False, num_workers=args.num_workers)
+
+    data_loader_vals_dev = None
+    if len(getattr(args, 'eval_selected_subsets_dev', [])) > 0:
+        dataset_vals_dev, selected_subsets_dev = dataset_creator.build_dataset("test", selected_subsets=args.eval_selected_subsets_dev)
+        data_loader_vals_dev = {}
+        for dataset_val, selected_subset in zip(dataset_vals_dev, selected_subsets_dev):
+            if args.distributed:
+                sampler_val = DistributedSampler(dataset_val, shuffle=False)
+            else:
+                sampler_val = SequentialSampler(dataset_val)
+            data_loader_vals_dev[selected_subset] = DataLoader(
+                dataset_val,
+                args.evalbatchsize,
+                sampler=sampler_val,
+                drop_last=False,
+                num_workers=args.num_workers,
+            )
 
     model = build_model(args)
     model = model.to(device)
@@ -313,10 +347,24 @@ def main(args):
         print('Epoch training time {}'.format(epoch_time_str))
         
         args.current_epoch = epoch
+        last_epoch = epoch == args.epoch - 1
+        eval_due = ((epoch + 1) % max(int(args.eval_interval), 1) == 0)
+        if epoch == args.start_epoch and args.eval_first_epoch:
+            eval_due = True
+        if last_epoch and args.full_eval_last_epoch:
+            eval_due = True
+        if not eval_due:
+            if is_main_process():
+                print('Skip evaluation at epoch {} because eval_interval={}'.format(epoch, args.eval_interval))
+            continue
+
+        eval_loaders = data_loader_vals
+        if data_loader_vals_dev is not None and not (last_epoch and args.full_eval_last_epoch):
+            eval_loaders = data_loader_vals_dev
         if args.ema:
-            output_strs, cur_ap, cur_acc = evaluate(model_ema.module, data_loader_vals, device, args=args)
+            output_strs, cur_ap, cur_acc = evaluate(model_ema.module, eval_loaders, device, args=args)
         else:
-            output_strs, cur_ap, cur_acc = evaluate(model, data_loader_vals, device, args=args)
+            output_strs, cur_ap, cur_acc = evaluate(model, eval_loaders, device, args=args)
 
 
         if args.output_dir and is_main_process():

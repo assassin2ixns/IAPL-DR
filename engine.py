@@ -86,15 +86,19 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
     epoch_records = []
     header_start = time.time()
     end = time.time()
+    amp_enabled = bool(getattr(args, 'amp', False)) and device.type == 'cuda'
+    amp_dtype = torch.bfloat16 if getattr(args, 'amp_dtype', 'bf16') == 'bf16' else torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and getattr(args, 'amp_dtype', 'bf16') == 'fp16')
 
     for iteration, samples in enumerate(data_loader):
         data_time = time.time() - end
         batch_start = time.time()
         images, labels = [sample.to(device, non_blocking=True) for sample in samples]
 
-        outputs = model(images)
-        loss_dict = model_without_ddp.get_criterion(outputs, labels)
-        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+            outputs = model(images)
+            loss_dict = model_without_ddp.get_criterion(outputs, labels)
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
         loss_dict_reduced = utils.reduce_dict(_detach_loss_dict(loss_dict))
         loss_dict_reduced_scaled = {
@@ -108,7 +112,11 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
             sys.exit(1)
 
         optimizer.zero_grad()
-        losses.backward()
+        if scaler.is_enabled():
+            scaler.scale(losses).backward()
+            scaler.unscale_(optimizer)
+        else:
+            losses.backward()
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
@@ -140,7 +148,11 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable,
             print('[TRAIN] epoch={} iter={} loss_total={:.5g} lr={:.5g}'.format(
                 epoch, iteration, loss_value, optimizer.param_groups[0]['lr']))
 
-        optimizer.step()
+        if scaler.is_enabled():
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         if model_ema:
             model_ema.update(model)
         end = time.time()
@@ -176,7 +188,7 @@ def _evaluate_iapl(model, data_loaders, device, args=None, degradation_name='non
     for data_name, data_loader in data_loaders.items():
         y_true, y_pred = [], []
         for batch_idx, samples in enumerate(data_loader):
-            if getattr(args, 'eval_max_batches_per_domain', 0) and batch_idx >= args.eval_max_batches_per_domain:
+            if getattr(args, 'eval_max_batches_per_domain', -1) > 0 and batch_idx >= args.eval_max_batches_per_domain:
                 break
             images, labels = [sample.to(device, non_blocking=True) for sample in samples]
             outputs = model(images)
@@ -232,7 +244,7 @@ def _evaluate_dream_once(model, data_loaders, device, args=None, degradation_nam
         local_rows = []
         sample_base = 0
         for batch_idx, samples in enumerate(data_loader):
-            if getattr(args, 'eval_max_batches_per_domain', 0) and batch_idx >= args.eval_max_batches_per_domain:
+            if getattr(args, 'eval_max_batches_per_domain', -1) > 0 and batch_idx >= args.eval_max_batches_per_domain:
                 break
             images, labels = [sample.to(device, non_blocking=True) for sample in samples]
             outputs = model(images)

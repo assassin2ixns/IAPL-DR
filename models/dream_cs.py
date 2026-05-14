@@ -100,6 +100,14 @@ class DREAMCSModel(CLIPModel):
             num_experts=self.num_experts,
             apply_init_bias=args.dream_apply_init_bias,
         )
+        self.dream_fast_prompt_delta_scale = nn.Parameter(
+            torch.ones(self.num_experts, 1, dtype=torch.float32)
+            * float(getattr(args, 'dream_fast_prompt_delta_scale_init', 0.1))
+        )
+        if getattr(args, 'dream_fast_prompt_delta_norm', True):
+            self.dream_fast_prompt_delta_ln = nn.LayerNorm(feature_dim)
+        else:
+            self.dream_fast_prompt_delta_ln = nn.Identity()
 
         self.criterion_weight_dict = {
             'loss_dream_clean': args.loss_dream_clean,
@@ -189,17 +197,47 @@ class DREAMCSModel(CLIPModel):
         assert anchor_ctx is not None, 'DREAM-CS Standalone requires shallow visual prompt context.'
         return image_vp, anchor_ctx, deep_prompts, pred_bias
 
-    def _encode_with_context(self, image_vp, ctx, deep_prompts):
+    def _slice_deep_prompts(self, deep_prompts, start, end):
+        sliced = []
+        for prompt in deep_prompts:
+            if torch.is_tensor(prompt) and prompt.dim() == 3 and prompt.shape[0] >= end:
+                sliced.append(prompt[start:end])
+            else:
+                sliced.append(prompt)
+        return sliced
+
+    def _encode_with_context(self, image_vp, ctx, deep_prompts, return_prompt_tokens=False):
         chunk = int(getattr(self.args, 'dream_expert_forward_chunk', 0))
         if chunk > 0 and image_vp.shape[0] > chunk:
             feats = []
+            prompt_tokens = []
             for start in range(0, image_vp.shape[0], chunk):
                 end = start + chunk
-                feat, _ = self.image_encoder(image_vp[start:end], ctx[start:end], deep_prompts)
+                self._debug_encoder_calls += 1
+                deep_chunk = self._slice_deep_prompts(deep_prompts, start, end)
+                out = self.image_encoder(
+                    image_vp[start:end],
+                    ctx[start:end],
+                    deep_chunk,
+                    return_prompt_tokens=return_prompt_tokens,
+                )
+                if return_prompt_tokens:
+                    feat, _, prompt_tok = out
+                    prompt_tokens.append(prompt_tok)
+                else:
+                    feat, _ = out
                 feats.append(feat)
-            return torch.cat(feats, dim=0)
+            feat_cat = torch.cat(feats, dim=0)
+            if return_prompt_tokens:
+                return feat_cat, torch.cat(prompt_tokens, dim=0)
+            return feat_cat
 
-        feat, _ = self.image_encoder(image_vp, ctx, deep_prompts)
+        self._debug_encoder_calls += 1
+        out = self.image_encoder(image_vp, ctx, deep_prompts, return_prompt_tokens=return_prompt_tokens)
+        if return_prompt_tokens:
+            feat, _, prompt_tokens = out
+            return feat, prompt_tokens
+        feat, _ = out
         return feat
 
     def _image_reliability_stats(self, image):
@@ -268,36 +306,85 @@ class DREAMCSModel(CLIPModel):
             ], dim=1)
         return rel.detach(), image_stats.detach(), counterfactual_stats.detach(), feature_residual_norm.detach()
 
-    def forward_once(self, image, force_anchor=False):
+    def _make_prompt_bank(self, anchor_ctx, residual):
+        bsz, prompt_len, prompt_dim = anchor_ctx.shape
+        k = residual.shape[1]
+        anchor_bank = anchor_ctx.unsqueeze(1)
+        expert_bank = anchor_ctx.unsqueeze(1) + residual
+        bank = torch.cat([anchor_bank, expert_bank], dim=1).reshape(bsz, (k + 1) * prompt_len, prompt_dim)
+        assert bank.shape == (bsz, (k + 1) * prompt_len, prompt_dim)
+        return bank
+
+    def _make_deep_prompt_bank(self, deep_prompts, residual, batch_size, dtype, device):
+        bank_deep_prompts = []
+        k = residual.shape[1]
+        use_residual = (
+            getattr(self.args, 'dream_fast_deep_bank', True)
+            and getattr(self.args, 'dream_fast_deep_residual', True)
+        )
+        for deep_prompt in deep_prompts:
+            base = deep_prompt.to(dtype=dtype, device=device)
+            if base.dim() == 2:
+                base = base.unsqueeze(0).expand(batch_size, -1, -1)
+            elif base.dim() == 3:
+                assert base.shape[0] == batch_size
+            else:
+                raise ValueError('deep prompt must be [M,D] or [B,M,D].')
+            assert base.shape[1] == residual.shape[2]
+            if use_residual:
+                anchor_deep = base.unsqueeze(1)
+                expert_deep = base.unsqueeze(1) + residual.to(dtype=dtype, device=device)
+                bank = torch.cat([anchor_deep, expert_deep], dim=1)
+            else:
+                bank = base.unsqueeze(1).expand(batch_size, k + 1, -1, -1)
+            bank = bank.reshape(batch_size, (k + 1) * base.shape[1], base.shape[2])
+            assert bank.shape[1] == (k + 1) * self.args.n_ctx
+            bank_deep_prompts.append(bank)
+        return bank_deep_prompts
+
+    def _readout_prompt_bank(self, prompt_tokens, cls_feat):
+        bsz = prompt_tokens.shape[0]
+        k = self.num_experts
+        prompt_len = self.args.n_ctx
+        feat_dim = prompt_tokens.shape[-1]
+        assert prompt_tokens.shape[1] == (k + 1) * prompt_len
+        prompt_tokens = prompt_tokens.reshape(bsz, k + 1, prompt_len, feat_dim)
+        pooled = prompt_tokens.mean(dim=2)
+        p0 = pooled[:, 0, :]
+        pe = pooled[:, 1:, :]
+        readout = getattr(self.args, 'dream_fast_readout', 'delta_from_prompt')
+        if readout == 'delta_from_prompt':
+            delta_feat = pe - p0.unsqueeze(1)
+            delta_feat = self.dream_fast_prompt_delta_ln(delta_feat)
+            scale = self.dream_fast_prompt_delta_scale.to(dtype=delta_feat.dtype, device=delta_feat.device).view(1, k, 1)
+            h0 = cls_feat
+            he = h0.unsqueeze(1) + scale * delta_feat
+        elif readout == 'prompt_direct':
+            h0 = p0
+            he = pe
+        elif readout == 'cls_plus_prompt':
+            scale = self.dream_fast_prompt_delta_scale.to(dtype=pe.dtype, device=pe.device).view(1, k, 1)
+            h0 = cls_feat + self.dream_fast_prompt_delta_scale.mean().to(dtype=cls_feat.dtype, device=cls_feat.device) * p0
+            he = cls_feat.unsqueeze(1) + scale * pe
+        else:
+            raise ValueError('Unsupported dream_fast_readout: {}'.format(readout))
+        return h0, he, p0, pe
+
+    def _finalize_forward_once(
+        self,
+        image,
+        residual,
+        h0,
+        he,
+        pred_bias,
+        force_anchor=False,
+        fast_info=None,
+    ):
         bsz = image.shape[0]
         k = self.num_experts
-        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
-
-        residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
-        expert_ctx = anchor_ctx.unsqueeze(1) + residual
-        all_ctx = torch.cat([anchor_ctx.unsqueeze(1), expert_ctx], dim=1)
-
-        prompt_len = anchor_ctx.shape[1]
-        prompt_dim = anchor_ctx.shape[2]
-        assert anchor_ctx.shape == (bsz, prompt_len, prompt_dim)
-        assert residual.shape == (bsz, k, prompt_len, prompt_dim)
-        assert expert_ctx.shape == (bsz, k, prompt_len, prompt_dim)
-
-        all_ctx = all_ctx.reshape(bsz * (k + 1), prompt_len, prompt_dim)
-        all_img = image_vp.unsqueeze(1).expand(-1, k + 1, -1, -1, -1)
-        all_img = all_img.reshape(bsz * (k + 1), *image_vp.shape[1:])
-        assert all_ctx.shape == (bsz * (k + 1), prompt_len, prompt_dim)
-        assert all_img.shape[0] == bsz * (k + 1)
-
-        all_feat = self._encode_with_context(all_img, all_ctx, deep_prompts)
-        feat_dim = all_feat.shape[-1]
-        assert all_feat.shape == (bsz * (k + 1), feat_dim)
-        all_feat = all_feat.reshape(bsz, k + 1, feat_dim)
-        h0 = all_feat[:, 0, :]
-        he = all_feat[:, 1:, :]
+        feat_dim = h0.shape[-1]
         assert h0.shape == (bsz, feat_dim)
         assert he.shape == (bsz, k, feat_dim)
-
         z0 = self.fc_binary(h0).squeeze(-1)
         ze = self.fc_binary(he.reshape(bsz * k, feat_dim)).reshape(bsz, k)
         assert z0.shape == (bsz,)
@@ -345,7 +432,7 @@ class DREAMCSModel(CLIPModel):
         assert q.shape == (bsz, k)
         assert apply_eff.shape == (bsz,)
         assert z.shape == (bsz,)
-        return {
+        output = {
             'logits': z.unsqueeze(-1),
             'logits_flat': z,
             'anchor_logits': z0,
@@ -360,6 +447,7 @@ class DREAMCSModel(CLIPModel):
             'delta_abs_mean': delta_raw.abs().mean(),
             'delta_clip_frac': delta_clip.mean(),
             'delta_clip_frac_per_expert': delta_clip.mean(dim=0),
+            'correction': z - z0,
             'h0': h0,
             'he': he,
             'prompt_residual_norm': residual_f.pow(2).mean(),
@@ -372,6 +460,148 @@ class DREAMCSModel(CLIPModel):
             'rel_features': rel,
             'pred_bias': pred_bias,
         }
+        if fast_info:
+            output.update(fast_info)
+        return output
+
+    def _forward_once_batchfold(self, image, force_anchor=False):
+        self._debug_encoder_calls = 0
+        bsz = image.shape[0]
+        k = self.num_experts
+        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+
+        residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
+        expert_ctx = anchor_ctx.unsqueeze(1) + residual
+        all_ctx = torch.cat([anchor_ctx.unsqueeze(1), expert_ctx], dim=1)
+
+        prompt_len = anchor_ctx.shape[1]
+        prompt_dim = anchor_ctx.shape[2]
+        assert anchor_ctx.shape == (bsz, prompt_len, prompt_dim)
+        assert residual.shape == (bsz, k, prompt_len, prompt_dim)
+        assert expert_ctx.shape == (bsz, k, prompt_len, prompt_dim)
+
+        all_ctx = all_ctx.reshape(bsz * (k + 1), prompt_len, prompt_dim)
+        all_img = image_vp.unsqueeze(1).expand(-1, k + 1, -1, -1, -1)
+        all_img = all_img.reshape(bsz * (k + 1), *image_vp.shape[1:])
+        assert all_ctx.shape == (bsz * (k + 1), prompt_len, prompt_dim)
+        assert all_img.shape[0] == bsz * (k + 1)
+
+        all_feat = self._encode_with_context(all_img, all_ctx, deep_prompts)
+        feat_dim = all_feat.shape[-1]
+        assert all_feat.shape == (bsz * (k + 1), feat_dim)
+        all_feat = all_feat.reshape(bsz, k + 1, feat_dim)
+        h0 = all_feat[:, 0, :]
+        he = all_feat[:, 1:, :]
+        fast_info = {
+            'fast_mode': 'off',
+            'prompt_bank_len': prompt_len,
+            'encoder_calls': torch.tensor(float(self._debug_encoder_calls), device=h0.device),
+            'encoder_calls_expected': torch.tensor(float(k + 1), device=h0.device),
+            'effective_encoder_multiplier': torch.tensor(float(k + 1), device=h0.device),
+            'anchor_purity': 'pure_anchor',
+            'fast_readout': 'batchfold',
+        }
+        return self._finalize_forward_once(image, residual, h0, he, pred_bias, force_anchor, fast_info)
+
+    def _forward_once_fast_bank_plus_anchor(self, image, force_anchor=False):
+        self._debug_encoder_calls = 0
+        bsz = image.shape[0]
+        k = self.num_experts
+        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+        residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
+        h0_pure = self._encode_with_context(image_vp, anchor_ctx, deep_prompts, return_prompt_tokens=False)
+        bank_ctx = self._make_prompt_bank(anchor_ctx, residual)
+        bank_deep_prompts = self._make_deep_prompt_bank(deep_prompts, residual, bsz, anchor_ctx.dtype, anchor_ctx.device)
+        for prompt in bank_deep_prompts:
+            if torch.is_tensor(prompt) and prompt.dim() == 3:
+                assert prompt.shape[1] == bank_ctx.shape[1]
+        bank_cls, prompt_tokens = self._encode_with_context(
+            image_vp,
+            bank_ctx,
+            bank_deep_prompts,
+            return_prompt_tokens=True,
+        )
+        h0, he, p0, pe = self._readout_prompt_bank(prompt_tokens, h0_pure)
+        prompt_delta = pe - p0.unsqueeze(1)
+        prompt_delta_norm = prompt_delta.float().pow(2).mean(dim=-1).sqrt() / math.sqrt(float(prompt_delta.shape[-1]))
+        fast_info = {
+            'fast_mode': 'bank_plus_anchor',
+            'prompt_bank_len': bank_ctx.shape[1],
+            'encoder_calls': torch.tensor(float(self._debug_encoder_calls), device=h0.device),
+            'encoder_calls_expected': torch.tensor(2.0, device=h0.device),
+            'effective_encoder_multiplier': torch.tensor(2.0, device=h0.device),
+            'anchor_purity': 'pure_anchor',
+            'fast_readout': getattr(self.args, 'dream_fast_readout', 'delta_from_prompt'),
+            'bank_cls': bank_cls,
+            'prompt_bank_anchor_feature': p0,
+            'prompt_bank_expert_feature': pe,
+            'fast_prompt_delta_scale': self.dream_fast_prompt_delta_scale.detach().view(-1).to(device=h0.device, dtype=h0.dtype),
+            'prompt_delta_norm_per_expert': prompt_delta_norm.detach().mean(dim=0).to(device=h0.device, dtype=h0.dtype),
+        }
+        out = self._finalize_forward_once(image, residual, h0, he, pred_bias, force_anchor, fast_info)
+        out['prompt_delta_logit_per_expert'] = out['delta_raw'].detach().mean(dim=0)
+        return out
+
+    def _forward_once_fast_single_bank(self, image, force_anchor=False):
+        self._debug_encoder_calls = 0
+        bsz = image.shape[0]
+        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+        residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
+        bank_ctx = self._make_prompt_bank(anchor_ctx, residual)
+        bank_deep_prompts = self._make_deep_prompt_bank(deep_prompts, residual, bsz, anchor_ctx.dtype, anchor_ctx.device)
+        for prompt in bank_deep_prompts:
+            if torch.is_tensor(prompt) and prompt.dim() == 3:
+                assert prompt.shape[1] == bank_ctx.shape[1]
+        bank_cls, prompt_tokens = self._encode_with_context(
+            image_vp,
+            bank_ctx,
+            bank_deep_prompts,
+            return_prompt_tokens=True,
+        )
+        h0, he, p0, pe = self._readout_prompt_bank(prompt_tokens, bank_cls)
+        prompt_delta = pe - p0.unsqueeze(1)
+        prompt_delta_norm = prompt_delta.float().pow(2).mean(dim=-1).sqrt() / math.sqrt(float(prompt_delta.shape[-1]))
+        fast_info = {
+            'fast_mode': 'single_bank',
+            'prompt_bank_len': bank_ctx.shape[1],
+            'encoder_calls': torch.tensor(float(self._debug_encoder_calls), device=h0.device),
+            'encoder_calls_expected': torch.tensor(1.0, device=h0.device),
+            'effective_encoder_multiplier': torch.tensor(1.0, device=h0.device),
+            'anchor_purity': 'bank_context',
+            'fast_readout': getattr(self.args, 'dream_fast_readout', 'delta_from_prompt'),
+            'bank_cls': bank_cls,
+            'prompt_bank_anchor_feature': p0,
+            'prompt_bank_expert_feature': pe,
+            'fast_prompt_delta_scale': self.dream_fast_prompt_delta_scale.detach().view(-1).to(device=h0.device, dtype=h0.dtype),
+            'prompt_delta_norm_per_expert': prompt_delta_norm.detach().mean(dim=0).to(device=h0.device, dtype=h0.dtype),
+        }
+        out = self._finalize_forward_once(image, residual, h0, he, pred_bias, force_anchor, fast_info)
+        out['prompt_delta_logit_per_expert'] = out['delta_raw'].detach().mean(dim=0)
+        return out
+
+    def forward_once(self, image, force_anchor=False):
+        mode = getattr(self.args, 'dream_fast_mode', 'off')
+        if mode == 'off':
+            out = self._forward_once_batchfold(image, force_anchor=force_anchor)
+        elif mode == 'bank_plus_anchor':
+            out = self._forward_once_fast_bank_plus_anchor(image, force_anchor=force_anchor)
+        elif mode == 'single_bank':
+            out = self._forward_once_fast_single_bank(image, force_anchor=force_anchor)
+        else:
+            raise ValueError('Unsupported dream_fast_mode: {}'.format(mode))
+
+        if mode != 'off' and getattr(self.args, 'dream_fast_compare_batchfold', False):
+            with torch.no_grad():
+                old_mode = self.args.dream_fast_mode
+                self.args.dream_fast_mode = 'off'
+                batchfold = self._forward_once_batchfold(image, force_anchor=force_anchor)
+                self.args.dream_fast_mode = old_mode
+            out['compare_anchor_logit_abs_diff'] = (out['anchor_logits'] - batchfold['anchor_logits']).abs().mean()
+            out['compare_expert_logit_abs_diff_mean'] = (out['expert_logits'] - batchfold['expert_logits']).abs().mean()
+            out['compare_final_logit_abs_diff'] = (out['logits_flat'] - batchfold['logits_flat']).abs().mean()
+            out['compare_q_abs_diff'] = (out['q'] - batchfold['q']).abs().mean()
+            out['compare_apply_abs_diff'] = (out['apply'] - batchfold['apply']).abs().mean()
+        return out
 
     def forward(self, image):
         if not self.training and getattr(self.args, 'dream_eval_degradation', 'none') != 'none':

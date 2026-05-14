@@ -457,3 +457,112 @@ End torch.distributed.barrier()
 [TRAIN] epoch=0 iter=17800 loss_total=0.96582 lr=5e-05 train_acc_final=1 train_acc_anchor=1 train_racc_final=1 train_facc_final=1 apply_eff_mean=0.66782 q_entropy_mean=1.0949 correction_abs_mean=0.0070445 cavr=0.125 help_rate=0 harm_rate=0 active_rate=0.875 residual_cos_offdiag_mean=9.4411e-05 max_gpu_mem_mb=36099
 [TRAIN] epoch=0 iter=17850 loss_total=1.4297 lr=5e-05 train_acc_final=1 train_acc_anchor=1 train_racc_final=1 train_facc_final=1 apply_eff_mean=0.67168 q_entropy_mean=1.0949 correction_abs_mean=0.012864 cavr=0.375 help_rate=0 harm_rate=0 active_rate=0.75 residual_cos_offdiag_mean=4.1089e-06 max_gpu_mem_mb=36099
 [TRAIN] epoch=0 iter=17900 loss_total=0.91783 lr=5e-05 train_acc_final=1 train_acc_anchor=1 train_racc_final=1 train_facc_final=1 apply_eff_mean=0.66995 q_entropy_mean=1.095 correction_abs_mean=0.0078465 cavr=0.5 help_rate=0 harm_rate=0 active_rate=0.375 residual_cos_offdiag_mean=7.4405e-07 max_gpu_mem_mb=36099
+[TRAIN] epoch=0 iter=17950 loss_total=1.0174 lr=5e-05 train_acc_final=1 train_acc_anchor=1 train_racc_final=1 train_facc_final=1 apply_eff_mean=0.66819 q_entropy_mean=1.0949 correction_abs_mean=0.0099347 cavr=0.5 help_rate=0 harm_rate=0 active_rate=0.625 residual_cos_offdiag_mean=3.5986e-07 max_gpu_mem_mb=36099
+[TRAIN] epoch=0 iter=18000 loss_total=1.1208 lr=5e-05 train_acc_final=1 train_acc_anchor=1 train_racc_final=1 train_facc_final=1 apply_eff_mean=0.66912 q_entropy_mean=1.0949 correction_abs_mean=0.014737 cavr=0.5 help_rate=0 harm_rate=0 active_rate=0.625 residual_cos_offdiag_mean=5.1207e-07 max_gpu_mem_mb=36099
+/data2/caiguoqing/IAPL/utils/dream_logging.py:691: RuntimeWarning: Mean of empty slice
+  out[key] = float(np.nanmean(vals))
+[TRAIN-EPOCH] epoch=0 elapsed_sec=53792.6 loss_total=1.1664 acc_final=0.9982 apply=0.6304 q_entropy=1.0890
+Epoch training time 14:56:37
+(crn) acc: 99.27; ap: 99.98; racc: 98.54; facc: 100.00;
+[DREAM-EVAL] domain=crn deg=none final acc=99.27 ap=99.98 racc=98.54 facc=100.00
+[DREAM-EVAL] domain=crn deg=none anchor acc=99.27 ap=99.98 racc=98.54 facc=100.00
+[DREAM-EVAL] domain=crn deg=none cavr=0.4764 help=0.0000 harm=0.0000 apply=0.6482 q=[0.3248,0.3721,0.3032] corr=0.0001
+(cyclegan) acc: 99.66; ap: 100.00; racc: 99.32; facc: 100.00;
+[DREAM-EVAL] domain=cyclegan deg=none final acc=99.66 ap=100.00 racc=99.32 facc=100.00
+[DREAM-EVAL] domain=cyclegan deg=none anchor acc=99.66 ap=100.00 racc=99.32 facc=100.00
+[DREAM-EVAL] domain=cyclegan deg=none cavr=0.1544 help=0.0000 harm=0.0000 apply=0.6481 q=[0.3249,0.3718,0.3033] corr=0.0000
+(biggan) acc: 99.38; ap: 99.98; racc: 99.25; facc: 99.50;
+[DREAM-EVAL] domain=biggan deg=none final acc=99.38 ap=99.98 racc=99.25 facc=99.50
+[DREAM-EVAL] domain=biggan deg=none anchor acc=99.38 ap=99.98 racc=99.25 facc=99.50
+[DREAM-EVAL] domain=biggan deg=none cavr=0.2520 help=0.0000 harm=0.0000 apply=0.6482 q=[0.3248,0.3719,0.3033] corr=0.0000
+(deepfake) acc: 69.68; ap: 96.69; racc: 99.96; facc: 39.29;
+[DREAM-EVAL] domain=deepfake deg=none final acc=69.68 ap=96.69 racc=99.96 facc=39.29
+[DREAM-EVAL] domain=deepfake deg=none anchor acc=69.68 ap=96.69 racc=99.96 facc=39.29
+[DREAM-EVAL] domain=deepfake deg=none cavr=0.3556 help=0.0000 harm=0.0000 apply=0.6450 q=[0.3249,0.3722,0.3029] corr=0.0001
+(gaugan) acc: 99.66; ap: 99.98; racc: 99.34; facc: 99.98;
+[DREAM-EVAL] domain=gaugan deg=none final acc=99.66 ap=99.98 racc=99.34 facc=99.98
+[DREAM-EVAL] domain=gaugan deg=none anchor acc=99.66 ap=99.98 racc=99.34 facc=99.98
+[DREAM-EVAL] domain=gaugan deg=none cavr=0.2292 help=0.0000 harm=0.0000 apply=0.6481 q=[0.3248,0.3719,0.3033] corr=0.0000
+(imle) acc: 99.27; ap: 99.99; racc: 98.54; facc: 100.00;
+[DREAM-EVAL] domain=imle deg=none final acc=99.27 ap=99.99 racc=98.54 facc=100.00
+[DREAM-EVAL] domain=imle deg=none anchor acc=99.27 ap=99.99 racc=98.54 facc=100.00
+[DREAM-EVAL] domain=imle deg=none cavr=0.4641 help=0.0000 harm=0.0000 apply=0.6480 q=[0.3247,0.3722,0.3031] corr=0.0001
+(progan) acc: 99.96; ap: 100.00; racc: 100.00; facc: 99.92;
+[DREAM-EVAL] domain=progan deg=none final acc=99.96 ap=100.00 racc=100.00 facc=99.92
+[DREAM-EVAL] domain=progan deg=none anchor acc=99.96 ap=100.00 racc=100.00 facc=99.92
+[DREAM-EVAL] domain=progan deg=none cavr=0.0486 help=0.0000 harm=0.0000 apply=0.6484 q=[0.3250,0.3716,0.3034] corr=0.0000
+(san) acc: 56.16; ap: 69.60; racc: 100.00; facc: 12.33;
+[DREAM-EVAL] domain=san deg=none final acc=56.16 ap=69.60 racc=100.00 facc=12.33
+[DREAM-EVAL] domain=san deg=none anchor acc=56.16 ap=69.60 racc=100.00 facc=12.33
+[DREAM-EVAL] domain=san deg=none cavr=0.3059 help=0.0000 harm=0.0000 apply=0.6461 q=[0.3252,0.3714,0.3034] corr=0.0002
+(seeingdark) acc: 96.11; ap: 98.85; racc: 99.44; facc: 92.78;
+[DREAM-EVAL] domain=seeingdark deg=none final acc=96.11 ap=98.85 racc=99.44 facc=92.78
+[DREAM-EVAL] domain=seeingdark deg=none anchor acc=96.11 ap=98.85 racc=99.44 facc=92.78
+[DREAM-EVAL] domain=seeingdark deg=none cavr=0.4500 help=0.0000 harm=0.0000 apply=0.6452 q=[0.3246,0.3725,0.3029] corr=0.0001
+(stargan) acc: 99.97; ap: 100.00; racc: 99.95; facc: 100.00;
+[DREAM-EVAL] domain=stargan deg=none final acc=99.97 ap=100.00 racc=99.95 facc=100.00
+[DREAM-EVAL] domain=stargan deg=none anchor acc=99.97 ap=100.00 racc=99.95 facc=100.00
+[DREAM-EVAL] domain=stargan deg=none cavr=0.2294 help=0.0000 harm=0.0000 apply=0.6508 q=[0.3248,0.3722,0.3031] corr=0.0000
+(stylegan) acc: 90.00; ap: 98.81; racc: 100.00; facc: 80.00;
+[DREAM-EVAL] domain=stylegan deg=none final acc=90.00 ap=98.81 racc=100.00 facc=80.00
+[DREAM-EVAL] domain=stylegan deg=none anchor acc=90.00 ap=98.81 racc=100.00 facc=80.00
+[DREAM-EVAL] domain=stylegan deg=none cavr=0.0567 help=0.0000 harm=0.0000 apply=0.6471 q=[0.3250,0.3717,0.3033] corr=0.0000
+Traceback (most recent call last):
+  File "/data2/caiguoqing/IAPL/main.py", line 395, in <module>
+    main(args)
+  File "/data2/caiguoqing/IAPL/main.py", line 319, in main
+    output_strs, cur_ap, cur_acc = evaluate(model, data_loader_vals, device, args=args)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+WARNING:torch.distributed.elastic.agent.server.api:Received 2 death signal, shutting down workers
+WARNING:torch.distributed.elastic.multiprocessing.api:Sending process 2361846 closing signal SIGINT
+  File "/data2/caiguoqing/IAPL/engine.py", line 374, in evaluate
+    output_strs, cur_ap, cur_acc, _ = _evaluate_dream_once(model, data_loaders, device, args=args)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+  File "/data2/caiguoqing/IAPL/engine.py", line 234, in _evaluate_dream_once
+    for batch_idx, samples in enumerate(data_loader):
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 633, in __next__
+    data = self._next_data()
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 677, in _next_data
+    data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 51, in fetch
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 51, in <listcomp>
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/utils/data/dataset.py", line 243, in __getitem__
+    return self.datasets[dataset_idx][sample_idx]
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torchvision/datasets/folder.py", line 231, in __getitem__
+    sample = self.transform(sample)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torchvision/transforms/transforms.py", line 95, in __call__
+    img = t(img)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torchvision/transforms/transforms.py", line 137, in __call__
+    return F.to_tensor(pic)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torchvision/transforms/functional.py", line 174, in to_tensor
+    return img.to(dtype=default_float_dtype).div(255)
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/launch.py", line 196, in <module>
+    main()
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/launch.py", line 192, in main
+    launch(args)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/launch.py", line 177, in launch
+    run(args)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/run.py", line 785, in run
+    elastic_launch(
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 241, in launch_agent
+    result = agent.run()
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 129, in wrapper
+    result = f(*args, **kwargs)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 723, in run
+    result = self._invoke_run(role)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 864, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/data2/caiguoqing/.conda/envs/iapl/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 2361453 got signal: 2
