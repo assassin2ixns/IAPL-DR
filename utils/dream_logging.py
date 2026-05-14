@@ -789,6 +789,39 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
     pred_f = (p > 0.5).astype(int)
     pred_a = (p0 > 0.5).astype(int)
     pred_e = (pe > 0.5).astype(int)
+
+    def output_scalar(key, default=float('nan')):
+        value = outputs.get(key, default)
+        if isinstance(value, torch.Tensor):
+            return float(value.detach().float().mean().cpu().item())
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    fast_mode = outputs.get('fast_mode', getattr(args, 'dream_fast_mode', 'off'))
+    fast_readout = outputs.get('fast_readout', getattr(args, 'dream_fast_readout', 'batchfold'))
+    anchor_purity = outputs.get('anchor_purity', 'pure_anchor')
+    fast_scalars = {
+        'dream_encoder_calls': output_scalar('encoder_calls'),
+        'dream_encoder_calls_expected': output_scalar('encoder_calls_expected'),
+        'dream_effective_encoder_multiplier': output_scalar('effective_encoder_multiplier'),
+        'dream_prompt_bank_len': output_scalar('prompt_bank_len'),
+    }
+    fast_scale = to_numpy(outputs.get('fast_prompt_delta_scale')).reshape(-1)
+    prompt_delta_norm = to_numpy(outputs.get('prompt_delta_norm_per_expert')).reshape(-1)
+    prompt_delta_logit = to_numpy(outputs.get('prompt_delta_logit_per_expert')).reshape(-1)
+
+    bank_cls = outputs.get('bank_cls', None)
+    bank_cls_norm = to_numpy(bank_cls.detach().float().pow(2).mean(dim=-1).sqrt()) if isinstance(bank_cls, torch.Tensor) else np.full_like(z, np.nan)
+    p0_bank = outputs.get('prompt_bank_anchor_feature', None)
+    p0_norm = to_numpy(p0_bank.detach().float().pow(2).mean(dim=-1).sqrt()) if isinstance(p0_bank, torch.Tensor) else np.full_like(z, np.nan)
+    pe_bank = outputs.get('prompt_bank_expert_feature', None)
+    if isinstance(pe_bank, torch.Tensor):
+        pe_norm = to_numpy(pe_bank.detach().float().pow(2).mean(dim=-1).sqrt())
+    else:
+        pe_norm = np.full((len(labels_np), min(3, ze.shape[1])), np.nan)
+
     rows = []
     cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
     for i in range(len(labels_np)):
@@ -825,6 +858,15 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
             'oracle_gain_ce': float(ce_a[i] - oracle[i]),
             'final_oracle_gap_ce': float(ce_f[i] - oracle[i]),
             'high_conf_anchor_harm': int(abs(p0[i] - 0.5) * 2.0 > 0.8 and pred_a[i] == labels_np[i] and pred_f[i] != labels_np[i]),
+            'dream_fast_mode': fast_mode,
+            'fast_readout': fast_readout,
+            'anchor_purity': anchor_purity,
+            'dream_encoder_calls': fast_scalars['dream_encoder_calls'],
+            'dream_encoder_calls_expected': fast_scalars['dream_encoder_calls_expected'],
+            'dream_effective_encoder_multiplier': fast_scalars['dream_effective_encoder_multiplier'],
+            'dream_prompt_bank_len': fast_scalars['dream_prompt_bank_len'],
+            'bank_cls_norm': float(bank_cls_norm[i]) if i < len(bank_cls_norm) else float('nan'),
+            'p0_norm': float(p0_norm[i]) if i < len(p0_norm) else float('nan'),
         }
         for e in range(min(3, ze.shape[1])):
             row[f'p_expert{e}'] = float(pe[i, e])
@@ -835,6 +877,14 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
             row[f'q{e}'] = float(q[i, e])
             row[f'delta{e}'] = float(delta[i, e])
             row[f'delta_clamped{e}'] = float(delta_c[i, e])
+            if e < len(fast_scale):
+                row[f'fast_prompt_delta_scale_e{e}'] = float(fast_scale[e])
+            if e < len(prompt_delta_norm):
+                row[f'prompt_delta_norm_e{e}'] = float(prompt_delta_norm[e])
+            if e < len(prompt_delta_logit):
+                row[f'prompt_delta_logit_e{e}'] = float(prompt_delta_logit[e])
+            if e < pe_norm.shape[1]:
+                row[f'pe_norm_e{e}'] = float(pe_norm[i, e])
         rows.append(row)
     return rows
 
@@ -858,22 +908,39 @@ def domain_metrics_from_rows(args, rows, epoch, domain, degradation):
     p_anchor = np.asarray([r['p_anchor'] for r in rows], dtype=np.float64)
     record = base_record(args, epoch, None, None, 'eval_domain', domain, degradation,
                          batch_size=len(rows))
-    record['dream_fast_mode'] = getattr(args, 'dream_fast_mode', 'off')
-    record['dream_fast_readout'] = getattr(args, 'dream_fast_readout', 'batchfold')
+    record['dream_fast_mode'] = rows[0].get('dream_fast_mode', getattr(args, 'dream_fast_mode', 'off')) if rows else getattr(args, 'dream_fast_mode', 'off')
+    record['dream_fast_readout'] = rows[0].get('fast_readout', getattr(args, 'dream_fast_readout', 'batchfold')) if rows else getattr(args, 'dream_fast_readout', 'batchfold')
+    record['anchor_purity'] = rows[0].get('anchor_purity', 'pure_anchor') if rows else 'pure_anchor'
     mode = getattr(args, 'dream_fast_mode', 'off')
-    if mode == 'single_bank':
+    if rows and 'dream_encoder_calls_expected' in rows[0]:
+        record['dream_encoder_calls'] = safe_mean([r.get('dream_encoder_calls', float('nan')) for r in rows])
+        record['dream_encoder_calls_expected'] = safe_mean([r.get('dream_encoder_calls_expected', float('nan')) for r in rows])
+        record['dream_effective_encoder_multiplier'] = safe_mean([r.get('dream_effective_encoder_multiplier', float('nan')) for r in rows])
+        record['dream_prompt_bank_len'] = safe_mean([r.get('dream_prompt_bank_len', float('nan')) for r in rows])
+    elif mode == 'single_bank':
         record['encoder_calls_expected'] = 1.0
-        record['anchor_purity'] = 'bank_context'
+        record['dream_encoder_calls_expected'] = 1.0
+        record['dream_effective_encoder_multiplier'] = 1.0
     elif mode == 'bank_plus_anchor':
         record['encoder_calls_expected'] = 2.0
-        record['anchor_purity'] = 'pure_anchor'
+        record['dream_encoder_calls_expected'] = 2.0
+        record['dream_effective_encoder_multiplier'] = 2.0
     else:
         record['encoder_calls_expected'] = float(getattr(args, 'dream_num_experts', 3) + 1)
-        record['anchor_purity'] = 'pure_anchor'
-    record['prompt_bank_len'] = (
+        record['dream_encoder_calls_expected'] = float(getattr(args, 'dream_num_experts', 3) + 1)
+        record['dream_effective_encoder_multiplier'] = float(getattr(args, 'dream_num_experts', 3) + 1)
+    if 'dream_prompt_bank_len' not in record:
+        record['dream_prompt_bank_len'] = (
         float((getattr(args, 'dream_num_experts', 3) + 1) * getattr(args, 'n_ctx', 2))
         if mode != 'off' else float(getattr(args, 'n_ctx', 2))
-    )
+        )
+    for e in range(3):
+        for key in [f'fast_prompt_delta_scale_e{e}', f'prompt_delta_norm_e{e}', f'prompt_delta_logit_e{e}', f'pe_norm_e{e}']:
+            if rows and key in rows[0]:
+                record[key] = safe_mean([r.get(key, float('nan')) for r in rows])
+    for key in ['bank_cls_norm', 'p0_norm']:
+        if rows and key in rows[0]:
+            record[key] = safe_mean([r.get(key, float('nan')) for r in rows])
     record.update(binary_metrics(y, p_final, 'final'))
     record.update(binary_metrics(y, p_anchor, 'anchor'))
     for e in range(3):

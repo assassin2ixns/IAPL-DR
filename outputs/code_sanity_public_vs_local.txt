@@ -1,0 +1,185 @@
+DREAM-CS-Fast public-main reference local sanity report
+Summary
+- 本地已经超过 public main：fast parser、fast scripts、DREAMCSModel fast paths、MaPLe return_prompt_tokens/dynamic prompt_len、AMP/eval interval、oracle/no-regret logging 均已存在。
+- 脚本有但 parser 没有的参数：未发现；fast scripts 和 gpus67 runner 的参数已通过 parser check。
+- 模型状态：models/dream_cs.py 同时保留 batch-fold off，并实现 bank_plus_anchor 与 single_bank。
+- CLIP/MaPLe 状态：models/clip/model.py 支持 prompt-bank tokens、动态 prompt_len、[B,P,D] deep prompts、prompt token projected readout。
+- Oracle logging：expert_oracle_gain_ce / final_oracle_gap_ce / router_capture_rate 已存在并保留。
+- Fast logging：train/eval/sample rows 已包含 fast mode、encoder calls、prompt bank length、anchor purity、prompt delta diagnostics。
+- 本轮额外修复：sample-level CSV/eval domain 补齐 fast-specific 字段，保证事后可按样本排查 prompt-bank 行为。
+
+================================================================================
+git status
+$ git status --short
+ M scripts/run_dream_cs_ufd_gpus67.sh
+ M utils/__pycache__/dream_logging.cpython-310.pyc
+ M utils/dream_logging.py
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint_epoch_0.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint_last.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint_epoch_0.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint_last.pth
+
+================================================================================
+git diff --stat
+$ git diff --stat
+ scripts/run_dream_cs_ufd_gpus67.sh              |  89 ++++++++++++++++++------
+ utils/__pycache__/dream_logging.cpython-310.pyc | Bin 53880 -> 56463 bytes
+ utils/dream_logging.py                          |  83 +++++++++++++++++++---
+ 3 files changed, 144 insertions(+), 28 deletions(-)
+
+================================================================================
+dream_fast_mode
+$ grep -R "dream_fast_mode" -n main.py models/dream_cs.py engine.py scripts || true
+main.py:123:    parser.add_argument('--dream_fast_mode', type=str, default='off',
+main.py:200:        mode = getattr(args, 'dream_fast_mode', 'off')
+models/dream_cs.py:613:        mode = getattr(self.args, 'dream_fast_mode', 'off')
+models/dream_cs.py:627:            raise ValueError('Unsupported dream_fast_mode: {}'.format(mode))
+models/dream_cs.py:631:                old_mode = self.args.dream_fast_mode
+models/dream_cs.py:632:                self.args.dream_fast_mode = 'off'
+models/dream_cs.py:634:                self.args.dream_fast_mode = old_mode
+scripts/run_dream_cs_fast_debug_universalfake.sh:33:  --dream_fast_mode single_bank \
+scripts/run_dream_cs_ufd_gpus67.sh:95:        --dream_fast_mode ${FAST_MODE} \
+scripts/run_dream_cs_fast_safe_universalfake.sh:33:  --dream_fast_mode bank_plus_anchor \
+scripts/run_dream_cs_fast_full_universalfake.sh:37:  --dream_fast_mode ${FAST_MODE} \
+
+================================================================================
+_forward_once_fast
+$ grep -R "_forward_once_fast" -n models/dream_cs.py || true
+536:    def _forward_once_fast_bank_plus_anchor(self, image, force_anchor=False):
+575:    def _forward_once_fast_single_bank(self, image, force_anchor=False):
+623:            out = self._forward_once_fast_bank_plus_anchor(image, force_anchor=force_anchor)
+625:            out = self._forward_once_fast_single_bank(image, force_anchor=force_anchor)
+
+================================================================================
+_readout_prompt_bank
+$ grep -R "_readout_prompt_bank" -n models/dream_cs.py || true
+358:    def _readout_prompt_bank(self, prompt_tokens, cls_feat):
+554:        h0, he, p0, pe = self._readout_prompt_bank(prompt_tokens, h0_pure)
+591:        h0, he, p0, pe = self._readout_prompt_bank(prompt_tokens, bank_cls)
+
+================================================================================
+return_prompt_tokens
+$ grep -R "return_prompt_tokens" -n models/clip/model.py models/dream_cs.py models/clip_models.py || true
+models/clip/model.py:571:        return_prompt_tokens: bool = False,
+models/clip/model.py:607:        if return_prompt_tokens:
+models/clip/model.py:620:        if return_prompt_tokens:
+models/dream_cs.py:220:    def _encode_with_context(self, image_vp, ctx, deep_prompts, return_prompt_tokens=False):
+models/dream_cs.py:235:                    return_prompt_tokens=return_prompt_tokens,
+models/dream_cs.py:237:                if return_prompt_tokens:
+models/dream_cs.py:244:            if return_prompt_tokens:
+models/dream_cs.py:249:        out = self.image_encoder(image_vp, ctx, deep_prompts, return_prompt_tokens=return_prompt_tokens)
+models/dream_cs.py:250:        if return_prompt_tokens:
+models/dream_cs.py:542:        h0_pure = self._encode_with_context(image_vp, anchor_ctx, deep_prompts, return_prompt_tokens=False)
+models/dream_cs.py:552:            return_prompt_tokens=True,
+models/dream_cs.py:589:            return_prompt_tokens=True,
+
+================================================================================
+prompt_len
+$ grep -R "prompt_len" -n models/clip/model.py || true
+359:        prompt_len = inputs[4] if len(inputs) > 4 else self.compound_prompt_nctx
+370:                        assert prompt_len > 0
+371:                        prefix = x[0:x.shape[0] - prompt_len, :, :]
+372:                        suffix = x[x.shape[0] - prompt_len:, :, :]
+373:                        assert suffix.shape[0] == prompt_len
+378:                            if visual_context.shape[0] != prompt_len:
+379:                                if prompt_len % visual_context.shape[0] != 0:
+381:                                        'Cannot repeat deep visual prompt length {} to prompt_len {}.'.format(
+382:                                            visual_context.shape[0], prompt_len
+385:                                visual_context = visual_context.repeat(prompt_len // visual_context.shape[0], 1)
+389:                            assert visual_context.shape[1] == prompt_len
+393:                        assert visual_context.shape[0] == prompt_len
+399:                            if prompt_len != self.compound_prompt_nctx:
+400:                                assert prompt_len % self.compound_prompt_nctx == 0
+401:                                gamma = gamma.repeat(prompt_len // self.compound_prompt_nctx, 1)
+438:            return [x, compound_prompts_deeper, counter, feat_bank, prompt_len]
+585:        prompt_len = 0
+592:                prompt_len = visual_ctx.shape[1]
+604:        outputs = self.transformer([x, compound_deeper_prompts, 0, [], prompt_len])  # third argument is counter
+608:            assert prompt_len > 0
+609:            prompt_tokens_raw = x[-prompt_len:, :, :].permute(1, 0, 2)
+
+================================================================================
+dream_warmup_freeze_router
+$ grep -R "dream_warmup_freeze_router" -n main.py models/dream_cs.py || true
+main.py:136:    parser.add_argument('--dream_warmup_freeze_router', type=str2bool, default=True)
+models/dream_cs.py:143:            getattr(self.args, 'dream_warmup_freeze_router', False)
+models/dream_cs.py:422:            and getattr(self.args, 'dream_warmup_freeze_router', False)
+models/dream_cs.py:798:                getattr(self.args, 'dream_warmup_freeze_router', False)
+
+================================================================================
+dream_balanced_degradation_views
+$ grep -R "dream_balanced_degradation_views" -n main.py utils/dream_degradations.py || true
+main.py:138:    parser.add_argument('--dream_balanced_degradation_views', type=str2bool, default=True)
+utils/dream_degradations.py:139:            if getattr(args, 'dream_balanced_degradation_views', False):
+
+================================================================================
+amp_dtype
+$ grep -R "amp_dtype" -n main.py engine.py scripts || true
+main.py:178:    parser.add_argument('--amp_dtype', type=str, default='bf16', choices=['fp16', 'bf16'])
+engine.py:132:    amp_dtype = torch.bfloat16 if getattr(args, 'amp_dtype', 'bf16') == 'bf16' else torch.float16
+engine.py:133:    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and getattr(args, 'amp_dtype', 'bf16') == 'fp16')
+engine.py:146:        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+scripts/run_dream_cs_fast_debug_universalfake.sh:55:  --amp_dtype bf16 \
+scripts/run_dream_cs_ufd_gpus67.sh:117:        --amp_dtype bf16 \
+scripts/run_dream_cs_fast_safe_universalfake.sh:55:  --amp_dtype bf16 \
+scripts/run_dream_cs_fast_full_universalfake.sh:59:  --amp_dtype bf16 \
+
+================================================================================
+autocast
+$ grep -R "autocast" -n engine.py || true
+146:        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+
+================================================================================
+GradScaler
+$ grep -R "GradScaler" -n engine.py || true
+133:    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and getattr(args, 'amp_dtype', 'bf16') == 'fp16')
+
+================================================================================
+expert_oracle_gain_ce
+$ grep -R "expert_oracle_gain_ce" -n utils/dream_logging.py engine.py || true
+utils/dream_logging.py:559:    record['expert_oracle_gain_ce'] = _safe_torch_mean(ce_anchor - expert_oracle_ce)
+utils/dream_logging.py:726:        'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
+utils/dream_logging.py:1028:        record['expert_oracle_gain_ce'] = float(np.mean(ce_a - oracle_e))
+utils/dream_logging.py:1100:                'expert_oracle_acc', 'candidate_oracle_acc', 'expert_oracle_gain_ce',
+utils/dream_logging.py:1314:        f"expert_oracle_gain={last.get('mean_expert_oracle_gain_ce')} final_oracle_gap={last.get('mean_final_oracle_gap_ce')} expert_better_rates={[last.get(f'mean_expert{i}_better_than_anchor_rate') for i in range(3)]}",
+
+================================================================================
+final_oracle_gap_ce
+$ grep -R "final_oracle_gap_ce" -n utils/dream_logging.py engine.py || true
+utils/dream_logging.py:561:    record['final_oracle_gap_ce'] = _safe_torch_mean(ce_final - oracle_ce)
+utils/dream_logging.py:726:        'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
+utils/dream_logging.py:859:            'final_oracle_gap_ce': float(ce_f[i] - oracle[i]),
+utils/dream_logging.py:1030:        record['final_oracle_gap_ce'] = float(np.mean(ce_f - oracle))
+utils/dream_logging.py:1101:                'candidate_oracle_gain_ce', 'final_oracle_gap_ce', 'router_capture_rate']:
+utils/dream_logging.py:1314:        f"expert_oracle_gain={last.get('mean_expert_oracle_gain_ce')} final_oracle_gap={last.get('mean_final_oracle_gap_ce')} expert_better_rates={[last.get(f'mean_expert{i}_better_than_anchor_rate') for i in range(3)]}",
+engine.py:395:                        'final_oracle_gap_ce': 0.0,
+
+================================================================================
+dream_encoder_calls
+$ grep -R "dream_encoder_calls" -n utils/dream_logging.py engine.py models/dream_cs.py || true
+utils/dream_logging.py:383:        ('encoder_calls', 'dream_encoder_calls'),
+utils/dream_logging.py:384:        ('encoder_calls_expected', 'dream_encoder_calls_expected'),
+utils/dream_logging.py:722:        'dream_fast_mode', 'dream_encoder_calls',
+utils/dream_logging.py:806:        'dream_encoder_calls': output_scalar('encoder_calls'),
+utils/dream_logging.py:807:        'dream_encoder_calls_expected': output_scalar('encoder_calls_expected'),
+utils/dream_logging.py:864:            'dream_encoder_calls': fast_scalars['dream_encoder_calls'],
+utils/dream_logging.py:865:            'dream_encoder_calls_expected': fast_scalars['dream_encoder_calls_expected'],
+utils/dream_logging.py:915:    if rows and 'dream_encoder_calls_expected' in rows[0]:
+utils/dream_logging.py:916:        record['dream_encoder_calls'] = safe_mean([r.get('dream_encoder_calls', float('nan')) for r in rows])
+utils/dream_logging.py:917:        record['dream_encoder_calls_expected'] = safe_mean([r.get('dream_encoder_calls_expected', float('nan')) for r in rows])
+utils/dream_logging.py:922:        record['dream_encoder_calls_expected'] = 1.0
+utils/dream_logging.py:926:        record['dream_encoder_calls_expected'] = 2.0
+utils/dream_logging.py:930:        record['dream_encoder_calls_expected'] = float(getattr(args, 'dream_num_experts', 3) + 1)
+
+================================================================================
+dream_prompt_bank_len
+$ grep -R "dream_prompt_bank_len" -n utils/dream_logging.py engine.py models/dream_cs.py || true
+utils/dream_logging.py:385:        ('prompt_bank_len', 'dream_prompt_bank_len'),
+utils/dream_logging.py:809:        'dream_prompt_bank_len': output_scalar('prompt_bank_len'),
+utils/dream_logging.py:867:            'dream_prompt_bank_len': fast_scalars['dream_prompt_bank_len'],
+utils/dream_logging.py:919:        record['dream_prompt_bank_len'] = safe_mean([r.get('dream_prompt_bank_len', float('nan')) for r in rows])
+utils/dream_logging.py:932:    if 'dream_prompt_bank_len' not in record:
+utils/dream_logging.py:933:        record['dream_prompt_bank_len'] = (
+
