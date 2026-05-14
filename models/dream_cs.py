@@ -139,6 +139,17 @@ class DREAMCSModel(CLIPModel):
 
     def set_epoch(self, epoch):
         self.current_epoch = int(epoch)
+        freeze_router = (
+            getattr(self.args, 'dream_warmup_freeze_router', False)
+            and self.current_epoch < int(getattr(self.args, 'dream_warmup_epochs', 0))
+        )
+        train_router = (
+            not freeze_router
+            and not self.args.dream_disable_router
+            and not self.args.dream_disable_expert_correction
+        )
+        for param in self.dream_router.parameters():
+            param.requires_grad = train_router
 
     def _load_anchor_checkpoint(self, ckpt_path):
         checkpoint = torch.load(ckpt_path, map_location='cpu')
@@ -207,6 +218,8 @@ class DREAMCSModel(CLIPModel):
         return sliced
 
     def _encode_with_context(self, image_vp, ctx, deep_prompts, return_prompt_tokens=False):
+        if not hasattr(self, '_debug_encoder_calls'):
+            self._debug_encoder_calls = 0
         chunk = int(getattr(self.args, 'dream_expert_forward_chunk', 0))
         if chunk > 0 and image_vp.shape[0] > chunk:
             feats = []
@@ -316,12 +329,12 @@ class DREAMCSModel(CLIPModel):
         return bank
 
     def _make_deep_prompt_bank(self, deep_prompts, residual, batch_size, dtype, device):
+        if not getattr(self.args, 'dream_fast_deep_bank', True):
+            return deep_prompts
+
         bank_deep_prompts = []
         k = residual.shape[1]
-        use_residual = (
-            getattr(self.args, 'dream_fast_deep_bank', True)
-            and getattr(self.args, 'dream_fast_deep_residual', True)
-        )
+        use_residual = getattr(self.args, 'dream_fast_deep_residual', True)
         for deep_prompt in deep_prompts:
             base = deep_prompt.to(dtype=dtype, device=device)
             if base.dim() == 2:
@@ -354,7 +367,8 @@ class DREAMCSModel(CLIPModel):
         pe = pooled[:, 1:, :]
         readout = getattr(self.args, 'dream_fast_readout', 'delta_from_prompt')
         if readout == 'delta_from_prompt':
-            delta_feat = pe - p0.unsqueeze(1)
+            p0_for_delta = p0.detach() if getattr(self.args, 'dream_fast_detach_anchor_prompt_pool', False) else p0
+            delta_feat = pe - p0_for_delta.unsqueeze(1)
             delta_feat = self.dream_fast_prompt_delta_ln(delta_feat)
             scale = self.dream_fast_prompt_delta_scale.to(dtype=delta_feat.dtype, device=delta_feat.device).view(1, k, 1)
             h0 = cls_feat
@@ -364,7 +378,8 @@ class DREAMCSModel(CLIPModel):
             he = pe
         elif readout == 'cls_plus_prompt':
             scale = self.dream_fast_prompt_delta_scale.to(dtype=pe.dtype, device=pe.device).view(1, k, 1)
-            h0 = cls_feat + self.dream_fast_prompt_delta_scale.mean().to(dtype=cls_feat.dtype, device=cls_feat.device) * p0
+            p0_for_anchor = p0.detach() if getattr(self.args, 'dream_fast_detach_anchor_prompt_pool', False) else p0
+            h0 = cls_feat + self.dream_fast_prompt_delta_scale.mean().to(dtype=cls_feat.dtype, device=cls_feat.device) * p0_for_anchor
             he = cls_feat.unsqueeze(1) + scale * pe
         else:
             raise ValueError('Unsupported dream_fast_readout: {}'.format(readout))
@@ -402,6 +417,12 @@ class DREAMCSModel(CLIPModel):
             max=self.args.dream_delta_clip,
         )
 
+        warmup_router = (
+            self.training
+            and getattr(self.args, 'dream_warmup_freeze_router', False)
+            and self.current_epoch < int(getattr(self.args, 'dream_warmup_epochs', 0))
+        )
+
         if self.args.dream_disable_expert_correction or force_anchor:
             q = z0.new_full((bsz, k), 1.0 / float(k))
             apply_raw = z0.new_zeros(bsz)
@@ -410,15 +431,24 @@ class DREAMCSModel(CLIPModel):
             z = z0
         else:
             rel, image_stats, counterfactual_stats, feature_residual_norm = self._build_reliability_features(image, z0, ze, h0, he)
-            q, apply_raw, apply_logit = self.dream_router(rel)
+            if warmup_router:
+                with torch.no_grad():
+                    q, apply_raw, apply_logit = self.dream_router(rel)
+            else:
+                q, apply_raw, apply_logit = self.dream_router(rel)
             if self.args.dream_disable_router:
                 q = z0.new_full((bsz, k), 1.0 / float(k))
                 apply_raw = z0.new_ones(bsz)
                 apply_logit = z0.new_full((bsz,), 20.0)
 
-            apply_eff = apply_raw
+            if warmup_router:
+                q = z0.new_full((bsz, k), 1.0 / float(k))
+                apply_eff = z0.new_full((bsz,), float(getattr(self.args, 'dream_warmup_fixed_apply', 0.2)))
+            else:
+                apply_eff = apply_raw
             if (
-                self.training
+                not warmup_router
+                and self.training
                 and self.args.dream_use_apply_floor
                 and self.current_epoch < self.args.dream_warmup_epochs
             ):
@@ -581,6 +611,12 @@ class DREAMCSModel(CLIPModel):
 
     def forward_once(self, image, force_anchor=False):
         mode = getattr(self.args, 'dream_fast_mode', 'off')
+        if (
+            self.training
+            and mode == 'single_bank'
+            and getattr(self.args, 'dream_fast_force_bank_plus_anchor_for_train', False)
+        ):
+            mode = 'bank_plus_anchor'
         if mode == 'off':
             out = self._forward_once_batchfold(image, force_anchor=force_anchor)
         elif mode == 'bank_plus_anchor':
@@ -758,6 +794,10 @@ class DREAMCSModel(CLIPModel):
             or self.args.dream_disable_router
             or self.args.dream_disable_expert_correction
             or self.current_epoch < self.args.dream_router_start_epoch
+            or (
+                getattr(self.args, 'dream_warmup_freeze_router', False)
+                and self.current_epoch < int(getattr(self.args, 'dream_warmup_epochs', 0))
+            )
         )
 
         i_clean = ce_anchor_clean.detach()[:, None] - ce_expert_clean.detach()

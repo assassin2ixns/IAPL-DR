@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+# DREAM-CS-Fast full UFD run.
+# FAST_MODE=bank_plus_anchor is the no-regret-safe main candidate.
+# FAST_MODE=single_bank is a speed-first ablation.
+# This standalone setting does not load an IAPL checkpoint.
+
 DATASET_PATH=${DATASET_PATH:-/data2/caiguoqing/Datasets/UniversalFakeDetect_full}
 CLIP_PATH=${CLIP_PATH:-/data2/caiguoqing/clip_weights/ViT-L-14.pt}
 PYTHON=${PYTHON:-/data2/caiguoqing/.conda/envs/iapl/bin/python}
@@ -38,9 +43,12 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} "${PYTHON}" -m torch.distributed.launch \
   --dream_residual_scale_init 1.0 \
   --dream_apply_init_bias -3.0 \
   --dream_warmup_epochs 1 \
+  --dream_warmup_freeze_router True \
+  --dream_warmup_fixed_apply 0.2 \
   --dream_router_start_epoch 1 \
   --dream_route_margin 0.01 \
   --dream_num_train_views 1 \
+  --dream_balanced_degradation_views True \
   --dream_expert_forward_chunk 0 \
   --dream_save_pred_csv False \
   --dream_log_router True \
@@ -49,6 +57,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} "${PYTHON}" -m torch.distributed.launch \
   --num_workers 8 \
   --amp True \
   --amp_dtype bf16 \
+  --tf32 True \
   --loss_dream_clean 1.0 \
   --loss_dream_anchor 1.0 \
   --loss_dream_expert 0.3 \

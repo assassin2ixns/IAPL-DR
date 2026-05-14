@@ -406,6 +406,20 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
         prompt_delta_logit = to_numpy(prompt_delta_logit).reshape(-1)
         for idx in range(min(3, prompt_delta_logit.shape[0])):
             record[f'dream_prompt_delta_logit_e{idx}'] = float(prompt_delta_logit[idx])
+    bank_cls = outputs.get('bank_cls', None)
+    if bank_cls is not None:
+        bank_cls_f = bank_cls.detach().float()
+        record['bank_cls_norm'] = _safe_torch_mean(bank_cls_f.pow(2).mean(dim=-1).sqrt())
+    p0_bank = outputs.get('prompt_bank_anchor_feature', None)
+    if p0_bank is not None:
+        p0_f = p0_bank.detach().float()
+        record['p0_norm'] = _safe_torch_mean(p0_f.pow(2).mean(dim=-1).sqrt())
+    pe_bank = outputs.get('prompt_bank_expert_feature', None)
+    if pe_bank is not None:
+        pe_f = pe_bank.detach().float()
+        pe_norm = pe_f.pow(2).mean(dim=-1).sqrt()
+        for idx in range(min(3, pe_norm.shape[1])):
+            record[f'pe_norm_e{idx}'] = _safe_torch_mean(pe_norm[:, idx])
     clean_loss = abs(record.get('loss_dream_clean', 0.0)) + EPS
     record['ratio_rob_to_clean'] = record.get('loss_dream_rob', 0.0) / clean_loss
     record['ratio_clean_safe_to_clean'] = record.get('loss_dream_clean_safe', 0.0) / clean_loss
@@ -445,7 +459,11 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
     record['ce_final_mean'] = _safe_torch_mean(ce_final)
     record['ce_anchor_mean'] = _safe_torch_mean(ce_anchor)
     record['ce_delta_final_minus_anchor'] = _safe_torch_mean(ce_final - ce_anchor)
-    record['cavr'] = _safe_torch_mean((ce_final > ce_anchor + 1e-6).float())
+    cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
+    record['cavr_raw'] = _safe_torch_mean((ce_final > ce_anchor).float())
+    record['cavr_eps'] = _safe_torch_mean((ce_final > ce_anchor + cavr_eps).float())
+    record['cavr_strict'] = _safe_torch_mean((ce_final > ce_anchor + 1e-3).float())
+    record['cavr'] = record['cavr_eps']
     margin = float(getattr(args, 'dream_clean_safe_margin', 0.0))
     record['clean_safe_violation_rate'] = _safe_torch_mean((ce_final > ce_anchor.detach() + margin).float())
     record['help_rate'] = _safe_torch_mean((correct_final & ~correct_anchor).float())
@@ -705,7 +723,8 @@ def concise_console_record(record):
         'loss_total', 'lr', 'train_acc_final', 'train_acc_anchor',
         'train_racc_final', 'train_facc_final', 'apply_eff_mean',
         'q_entropy_mean', 'correction_abs_mean', 'cavr', 'help_rate',
-        'harm_rate', 'active_rate', 'residual_cos_offdiag_mean',
+        'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
+        'active_rate', 'residual_cos_offdiag_mean',
         'max_gpu_mem_mb',
     ]
     return {k: record[k] for k in keys if k in record}
@@ -771,6 +790,7 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
     pred_a = (p0 > 0.5).astype(int)
     pred_e = (pe > 0.5).astype(int)
     rows = []
+    cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
     for i in range(len(labels_np)):
         row = {
             'sample_index': int(start_index + i),
@@ -790,7 +810,10 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
             'ce_anchor': float(ce_a[i]),
             'help': int(pred_f[i] == labels_np[i] and pred_a[i] != labels_np[i]),
             'harm': int(pred_f[i] != labels_np[i] and pred_a[i] == labels_np[i]),
-            'cavr': int(ce_f[i] > ce_a[i] + 1e-6),
+            'cavr_raw': int(ce_f[i] > ce_a[i]),
+            'cavr_eps': int(ce_f[i] > ce_a[i] + cavr_eps),
+            'cavr_strict': int(ce_f[i] > ce_a[i] + 1e-3),
+            'cavr': int(ce_f[i] > ce_a[i] + cavr_eps),
             'decision_flip': int(pred_f[i] != pred_a[i]),
             'anchor_margin': float(abs(p0[i] - 0.5) * 2.0),
             'final_margin': float(abs(p[i] - 0.5) * 2.0),
@@ -837,6 +860,20 @@ def domain_metrics_from_rows(args, rows, epoch, domain, degradation):
                          batch_size=len(rows))
     record['dream_fast_mode'] = getattr(args, 'dream_fast_mode', 'off')
     record['dream_fast_readout'] = getattr(args, 'dream_fast_readout', 'batchfold')
+    mode = getattr(args, 'dream_fast_mode', 'off')
+    if mode == 'single_bank':
+        record['encoder_calls_expected'] = 1.0
+        record['anchor_purity'] = 'bank_context'
+    elif mode == 'bank_plus_anchor':
+        record['encoder_calls_expected'] = 2.0
+        record['anchor_purity'] = 'pure_anchor'
+    else:
+        record['encoder_calls_expected'] = float(getattr(args, 'dream_num_experts', 3) + 1)
+        record['anchor_purity'] = 'pure_anchor'
+    record['prompt_bank_len'] = (
+        float((getattr(args, 'dream_num_experts', 3) + 1) * getattr(args, 'n_ctx', 2))
+        if mode != 'off' else float(getattr(args, 'n_ctx', 2))
+    )
     record.update(binary_metrics(y, p_final, 'final'))
     record.update(binary_metrics(y, p_anchor, 'anchor'))
     for e in range(3):
@@ -857,7 +894,11 @@ def domain_metrics_from_rows(args, rows, epoch, domain, degradation):
     record['facc_delta_final_anchor'] = record.get('final_facc', float('nan')) - record.get('anchor_facc', float('nan'))
     record['brier_delta_final_anchor'] = record.get('final_brier', float('nan')) - record.get('anchor_brier', float('nan'))
     record['ece_delta_final_anchor'] = record.get('final_ece_10', float('nan')) - record.get('anchor_ece_10', float('nan'))
-    record['cavr'] = float(np.mean(ce_f > ce_a + 1e-6))
+    cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
+    record['cavr_raw'] = float(np.mean(ce_f > ce_a))
+    record['cavr_eps'] = float(np.mean(ce_f > ce_a + cavr_eps))
+    record['cavr_strict'] = float(np.mean(ce_f > ce_a + 1e-3))
+    record['cavr'] = record['cavr_eps']
     record['help_rate'] = float(np.mean(f_ok & ~a_ok))
     record['harm_rate'] = float(np.mean(~f_ok & a_ok))
     record['both_correct_rate'] = float(np.mean(f_ok & a_ok))

@@ -353,7 +353,7 @@ class ResidualAttentionBlock_MaPLe(nn.Module):
         # For the first layer, we do not need to add any duplicate, as it is already added
         # as the shallow version
         x = inputs[0]
-        compound_prompts_deeper = inputs[1]
+        compound_prompts_deeper = inputs[1] if inputs[1] is not None else []
         counter = inputs[2]
         feat_bank = inputs[3] if len(inputs) > 3 else []
         prompt_len = inputs[4] if len(inputs) > 4 else self.compound_prompt_nctx
@@ -375,13 +375,24 @@ class ResidualAttentionBlock_MaPLe(nn.Module):
                         visual_context = compound_prompts_deeper[counter]  # extract the correct index
                         visual_context = visual_context.to(dtype=x.dtype, device=x.device)
                         if visual_context.dim() == 2:
+                            if visual_context.shape[0] != prompt_len:
+                                if prompt_len % visual_context.shape[0] != 0:
+                                    raise ValueError(
+                                        'Cannot repeat deep visual prompt length {} to prompt_len {}.'.format(
+                                            visual_context.shape[0], prompt_len
+                                        )
+                                    )
+                                visual_context = visual_context.repeat(prompt_len // visual_context.shape[0], 1)
                             visual_context = visual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2)
                         elif visual_context.dim() == 3:
                             assert visual_context.shape[0] == x.shape[1]
+                            assert visual_context.shape[1] == prompt_len
                             visual_context = visual_context.permute(1, 0, 2)
                         else:
                             raise ValueError('visual_context must be [P,D] or [B,P,D].')
                         assert visual_context.shape[0] == prompt_len
+                        assert visual_context.shape[1] == x.shape[1]
+                        assert visual_context.shape[2] == x.shape[2]
 
                         if self.gamma is not None:
                             gamma = self.gamma
@@ -555,11 +566,12 @@ class VisionTransformer_MaPLe(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        shared_ctx,
-        compound_deeper_prompts,
+        shared_ctx=None,
+        compound_deeper_prompts=None,
         return_prompt_tokens: bool = False,
         prompt_bank_meta: dict = None,
     ):
+        compound_deeper_prompts = compound_deeper_prompts if compound_deeper_prompts is not None else []
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -575,6 +587,7 @@ class VisionTransformer_MaPLe(nn.Module):
             if shared_ctx is not None:
                 # visual_ctx = shared_ctx.expand(x.shape[0], -1, -1)
                 assert shared_ctx.dim() == 3
+                assert shared_ctx.shape[0] == x.shape[0]
                 visual_ctx = shared_ctx
                 prompt_len = visual_ctx.shape[1]
                 x = torch.cat([x, visual_ctx], dim=1)
@@ -591,7 +604,8 @@ class VisionTransformer_MaPLe(nn.Module):
         outputs = self.transformer([x, compound_deeper_prompts, 0, [], prompt_len])  # third argument is counter
         x = outputs[0]
         prompt_tokens = None
-        if return_prompt_tokens and prompt_len > 0:
+        if return_prompt_tokens:
+            assert prompt_len > 0
             prompt_tokens_raw = x[-prompt_len:, :, :].permute(1, 0, 2)
             prompt_tokens = self.ln_post(prompt_tokens_raw)
             if self.proj is not None:

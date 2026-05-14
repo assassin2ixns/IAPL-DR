@@ -1,0 +1,194 @@
+DREAM-CS-Fast local code sanity check
+Summary:
+- Fast script/core mismatch: not present after fixes; parser, DREAMCSModel fast paths, MaPLe return_prompt_tokens/prompt_len, and logging hooks are present.
+- Repairs applied: parser defaults/flags, warmup freeze router, balanced degradation views, CAVR eps logging, deep prompt bank semantics, dynamic prompt_len compatibility, script flags.
+- Main setting remains standalone: no dream_anchor_ckpt in fast scripts.
+
+================================================================================
+git status --short
+$ git status --short
+ M __pycache__/engine.cpython-310.pyc
+ M __pycache__/main.cpython-310.pyc
+ M __pycache__/main.cpython-312.pyc
+ M main.py
+ M models/__pycache__/dream_cs.cpython-310.pyc
+ M models/__pycache__/dream_cs.cpython-312.pyc
+ M models/clip/__pycache__/model.cpython-310.pyc
+ M models/clip/__pycache__/model.cpython-312.pyc
+ M models/clip/model.py
+ M models/dream_cs.py
+ M scripts/run_dream_cs_fast_debug_universalfake.sh
+ M scripts/run_dream_cs_fast_full_universalfake.sh
+ M scripts/run_dream_cs_fast_safe_universalfake.sh
+ M utils/__pycache__/dream_degradations.cpython-310.pyc
+ M utils/__pycache__/dream_degradations.cpython-312.pyc
+ M utils/__pycache__/dream_logging.cpython-310.pyc
+ M utils/__pycache__/dream_logging.cpython-312.pyc
+ M utils/dream_degradations.py
+ M utils/dream_logging.py
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint_epoch_0.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint_last.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint_epoch_0.pth
+?? outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint_last.pth
+
+================================================================================
+rg dream_fast_mode
+$ rg -n dream_fast_mode main.py models/dream_cs.py engine.py scripts
+scripts/run_dream_cs_fast_full_universalfake.sh:37:  --dream_fast_mode ${FAST_MODE} \
+scripts/run_dream_cs_fast_safe_universalfake.sh:33:  --dream_fast_mode bank_plus_anchor \
+scripts/run_dream_cs_fast_debug_universalfake.sh:33:  --dream_fast_mode single_bank \
+models/dream_cs.py:613:        mode = getattr(self.args, 'dream_fast_mode', 'off')
+models/dream_cs.py:627:            raise ValueError('Unsupported dream_fast_mode: {}'.format(mode))
+models/dream_cs.py:631:                old_mode = self.args.dream_fast_mode
+models/dream_cs.py:632:                self.args.dream_fast_mode = 'off'
+models/dream_cs.py:634:                self.args.dream_fast_mode = old_mode
+main.py:123:    parser.add_argument('--dream_fast_mode', type=str, default='off',
+main.py:200:        mode = getattr(args, 'dream_fast_mode', 'off')
+
+================================================================================
+rg _forward_once_fast/_readout_prompt_bank
+$ rg -n _forward_once_fast|_readout_prompt_bank models/dream_cs.py
+358:    def _readout_prompt_bank(self, prompt_tokens, cls_feat):
+536:    def _forward_once_fast_bank_plus_anchor(self, image, force_anchor=False):
+554:        h0, he, p0, pe = self._readout_prompt_bank(prompt_tokens, h0_pure)
+575:    def _forward_once_fast_single_bank(self, image, force_anchor=False):
+591:        h0, he, p0, pe = self._readout_prompt_bank(prompt_tokens, bank_cls)
+623:            out = self._forward_once_fast_bank_plus_anchor(image, force_anchor=force_anchor)
+625:            out = self._forward_once_fast_single_bank(image, force_anchor=force_anchor)
+
+================================================================================
+rg return_prompt_tokens
+$ rg -n return_prompt_tokens models/clip/model.py models/dream_cs.py models/clip_models.py
+models/dream_cs.py:220:    def _encode_with_context(self, image_vp, ctx, deep_prompts, return_prompt_tokens=False):
+models/dream_cs.py:235:                    return_prompt_tokens=return_prompt_tokens,
+models/dream_cs.py:237:                if return_prompt_tokens:
+models/dream_cs.py:244:            if return_prompt_tokens:
+models/dream_cs.py:249:        out = self.image_encoder(image_vp, ctx, deep_prompts, return_prompt_tokens=return_prompt_tokens)
+models/dream_cs.py:250:        if return_prompt_tokens:
+models/dream_cs.py:542:        h0_pure = self._encode_with_context(image_vp, anchor_ctx, deep_prompts, return_prompt_tokens=False)
+models/dream_cs.py:552:            return_prompt_tokens=True,
+models/dream_cs.py:589:            return_prompt_tokens=True,
+models/clip/model.py:571:        return_prompt_tokens: bool = False,
+models/clip/model.py:607:        if return_prompt_tokens:
+models/clip/model.py:620:        if return_prompt_tokens:
+
+================================================================================
+rg prompt_len
+$ rg -n prompt_len models/clip/model.py
+359:        prompt_len = inputs[4] if len(inputs) > 4 else self.compound_prompt_nctx
+370:                        assert prompt_len > 0
+371:                        prefix = x[0:x.shape[0] - prompt_len, :, :]
+372:                        suffix = x[x.shape[0] - prompt_len:, :, :]
+373:                        assert suffix.shape[0] == prompt_len
+378:                            if visual_context.shape[0] != prompt_len:
+379:                                if prompt_len % visual_context.shape[0] != 0:
+381:                                        'Cannot repeat deep visual prompt length {} to prompt_len {}.'.format(
+382:                                            visual_context.shape[0], prompt_len
+385:                                visual_context = visual_context.repeat(prompt_len // visual_context.shape[0], 1)
+389:                            assert visual_context.shape[1] == prompt_len
+393:                        assert visual_context.shape[0] == prompt_len
+399:                            if prompt_len != self.compound_prompt_nctx:
+400:                                assert prompt_len % self.compound_prompt_nctx == 0
+401:                                gamma = gamma.repeat(prompt_len // self.compound_prompt_nctx, 1)
+438:            return [x, compound_prompts_deeper, counter, feat_bank, prompt_len]
+585:        prompt_len = 0
+592:                prompt_len = visual_ctx.shape[1]
+604:        outputs = self.transformer([x, compound_deeper_prompts, 0, [], prompt_len])  # third argument is counter
+608:            assert prompt_len > 0
+609:            prompt_tokens_raw = x[-prompt_len:, :, :].permute(1, 0, 2)
+
+================================================================================
+rg expert_oracle_gain
+$ rg -n expert_oracle_gain utils/dream_logging.py engine.py models/dream_cs.py
+utils/dream_logging.py:559:    record['expert_oracle_gain_ce'] = _safe_torch_mean(ce_anchor - expert_oracle_ce)
+utils/dream_logging.py:726:        'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
+utils/dream_logging.py:961:        record['expert_oracle_gain_ce'] = float(np.mean(ce_a - oracle_e))
+utils/dream_logging.py:1033:                'expert_oracle_acc', 'candidate_oracle_acc', 'expert_oracle_gain_ce',
+utils/dream_logging.py:1247:        f"expert_oracle_gain={last.get('mean_expert_oracle_gain_ce')} final_oracle_gap={last.get('mean_final_oracle_gap_ce')} expert_better_rates={[last.get(f'mean_expert{i}_better_than_anchor_rate') for i in range(3)]}",
+
+================================================================================
+rg final_oracle_gap
+$ rg -n final_oracle_gap utils/dream_logging.py engine.py models/dream_cs.py
+engine.py:395:                        'final_oracle_gap_ce': 0.0,
+utils/dream_logging.py:561:    record['final_oracle_gap_ce'] = _safe_torch_mean(ce_final - oracle_ce)
+utils/dream_logging.py:726:        'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
+utils/dream_logging.py:826:            'final_oracle_gap_ce': float(ce_f[i] - oracle[i]),
+utils/dream_logging.py:963:        record['final_oracle_gap_ce'] = float(np.mean(ce_f - oracle))
+utils/dream_logging.py:1034:                'candidate_oracle_gain_ce', 'final_oracle_gap_ce', 'router_capture_rate']:
+utils/dream_logging.py:1247:        f"expert_oracle_gain={last.get('mean_expert_oracle_gain_ce')} final_oracle_gap={last.get('mean_final_oracle_gap_ce')} expert_better_rates={[last.get(f'mean_expert{i}_better_than_anchor_rate') for i in range(3)]}",
+
+================================================================================
+rg dream_save_pred_csv
+$ rg -n dream_save_pred_csv main.py engine.py utils/dream_logging.py scripts
+utils/dream_logging.py:843:    if not rows or not getattr(args, 'dream_save_pred_csv', True) or not is_rank0():
+main.py:142:    parser.add_argument('--dream_save_pred_csv', type=str2bool, default=False)
+scripts/run_dream_cs_fast_full_universalfake.sh:53:  --dream_save_pred_csv False \
+scripts/run_dream_cs_fast_safe_universalfake.sh:49:  --dream_save_pred_csv False \
+scripts/run_dream_cs_ufd_gpus67.sh:75:        --dream_save_pred_csv True \
+scripts/run_dream_cs_fast_debug_universalfake.sh:49:  --dream_save_pred_csv False \
+scripts/run_dream_cs_universalfake.sh:61:    --dream_save_pred_csv True \
+
+================================================================================
+rg amp_dtype
+$ rg -n amp_dtype main.py engine.py scripts
+engine.py:132:    amp_dtype = torch.bfloat16 if getattr(args, 'amp_dtype', 'bf16') == 'bf16' else torch.float16
+engine.py:133:    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and getattr(args, 'amp_dtype', 'bf16') == 'fp16')
+engine.py:146:        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+scripts/run_dream_cs_fast_full_universalfake.sh:59:  --amp_dtype bf16 \
+scripts/run_dream_cs_fast_debug_universalfake.sh:55:  --amp_dtype bf16 \
+scripts/run_dream_cs_fast_safe_universalfake.sh:55:  --amp_dtype bf16 \
+main.py:178:    parser.add_argument('--amp_dtype', type=str, default='bf16', choices=['fp16', 'bf16'])
+
+================================================================================
+rg warmup/balanced/cavr/tf32
+$ rg -n dream_warmup_freeze_router|dream_balanced_degradation_views|dream_cavr_eps|tf32 main.py models/dream_cs.py utils/dream_degradations.py utils/dream_logging.py scripts
+utils/dream_logging.py:462:    cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
+utils/dream_logging.py:793:    cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
+utils/dream_logging.py:897:    cavr_eps = float(getattr(args, 'dream_cavr_eps', 1e-4))
+scripts/run_dream_cs_fast_full_universalfake.sh:46:  --dream_warmup_freeze_router True \
+scripts/run_dream_cs_fast_full_universalfake.sh:51:  --dream_balanced_degradation_views True \
+scripts/run_dream_cs_fast_full_universalfake.sh:60:  --tf32 True \
+scripts/run_dream_cs_fast_safe_universalfake.sh:42:  --dream_warmup_freeze_router True \
+scripts/run_dream_cs_fast_safe_universalfake.sh:47:  --dream_balanced_degradation_views True \
+scripts/run_dream_cs_fast_safe_universalfake.sh:56:  --tf32 True \
+models/dream_cs.py:143:            getattr(self.args, 'dream_warmup_freeze_router', False)
+models/dream_cs.py:422:            and getattr(self.args, 'dream_warmup_freeze_router', False)
+models/dream_cs.py:798:                getattr(self.args, 'dream_warmup_freeze_router', False)
+utils/dream_degradations.py:139:            if getattr(args, 'dream_balanced_degradation_views', False):
+scripts/run_dream_cs_fast_debug_universalfake.sh:42:  --dream_warmup_freeze_router True \
+scripts/run_dream_cs_fast_debug_universalfake.sh:47:  --dream_balanced_degradation_views True \
+scripts/run_dream_cs_fast_debug_universalfake.sh:56:  --tf32 True \
+main.py:136:    parser.add_argument('--dream_warmup_freeze_router', type=str2bool, default=True)
+main.py:138:    parser.add_argument('--dream_balanced_degradation_views', type=str2bool, default=True)
+main.py:141:    parser.add_argument('--dream_cavr_eps', type=float, default=1e-4)
+main.py:179:    parser.add_argument('--tf32', type=str2bool, default=True)
+main.py:195:    if getattr(args, 'tf32', True):
+main.py:196:        torch.backends.cuda.matmul.allow_tf32 = True
+main.py:197:        torch.backends.cudnn.allow_tf32 = True
+
+================================================================================
+git diff --stat
+$ git diff --stat
+ __pycache__/engine.cpython-310.pyc                 | Bin 14450 -> 14427 bytes
+ __pycache__/main.cpython-310.pyc                   | Bin 13229 -> 14482 bytes
+ __pycache__/main.cpython-312.pyc                   | Bin 26958 -> 29329 bytes
+ main.py                                            |  30 ++++++++++-
+ models/__pycache__/dream_cs.cpython-310.pyc        | Bin 26110 -> 26939 bytes
+ models/__pycache__/dream_cs.cpython-312.pyc        | Bin 54499 -> 56572 bytes
+ models/clip/__pycache__/model.cpython-310.pyc      | Bin 23665 -> 23989 bytes
+ models/clip/__pycache__/model.cpython-312.pyc      | Bin 47535 -> 48393 bytes
+ models/clip/model.py                               |  22 ++++++--
+ models/dream_cs.py                                 |  58 +++++++++++++++++----
+ scripts/run_dream_cs_fast_debug_universalfake.sh   |   7 +++
+ scripts/run_dream_cs_fast_full_universalfake.sh    |   9 ++++
+ scripts/run_dream_cs_fast_safe_universalfake.sh    |   7 +++
+ .../__pycache__/dream_degradations.cpython-310.pyc | Bin 5059 -> 5612 bytes
+ .../__pycache__/dream_degradations.cpython-312.pyc | Bin 8350 -> 9293 bytes
+ utils/__pycache__/dream_logging.cpython-310.pyc    | Bin 52737 -> 53880 bytes
+ utils/__pycache__/dream_logging.cpython-312.pyc    | Bin 108066 -> 110952 bytes
+ utils/dream_degradations.py                        |  26 ++++++++-
+ utils/dream_logging.py                             |  49 +++++++++++++++--
+ 19 files changed, 187 insertions(+), 21 deletions(-)
+

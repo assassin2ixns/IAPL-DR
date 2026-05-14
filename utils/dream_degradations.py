@@ -120,11 +120,33 @@ def make_train_degradation_views(x, args, return_names=True):
     pool = [name for name in getattr(args, 'dream_degradation_pool', []) if name not in ['none', 'identity']]
     if len(pool) == 0:
         pool = ['jpeg']
+    light_pool = [
+        name for name in getattr(args, 'dream_light_degradation_pool', ['jpeg90', 'jpeg75'])
+        if name not in ['none', 'identity']
+    ]
+    strong_pool = [
+        name for name in getattr(args, 'dream_strong_degradation_pool', ['jpeg50', 'resize', 'blur', 'quant', 'webp'])
+        if name not in ['none', 'identity']
+    ]
+    if len(light_pool) == 0:
+        light_pool = pool
+    if len(strong_pool) == 0:
+        strong_pool = pool
 
     views = []
     with torch.no_grad():
-        for _ in range(num_views):
-            name = random.choice(pool)
+        for view_idx in range(num_views):
+            if getattr(args, 'dream_balanced_degradation_views', False):
+                if num_views == 1:
+                    name = random.choice(light_pool if random.random() < 0.5 else strong_pool)
+                elif view_idx == 0:
+                    name = random.choice(light_pool)
+                elif view_idx == 1:
+                    name = random.choice(strong_pool)
+                else:
+                    name = random.choice(pool)
+            else:
+                name = random.choice(pool)
             degraded = apply_named_degradation(x, name, args.dataset)
             if return_names:
                 views.append({'name': name, 'image': degraded})

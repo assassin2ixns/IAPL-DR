@@ -91,10 +91,10 @@ def get_args_parser():
     parser.add_argument('--dream_rank', type=int, default=8)
     parser.add_argument('--dream_router_hidden', type=int, default=32)
     parser.add_argument('--dream_delta_clip', type=float, default=1.0)
-    parser.add_argument('--dream_residual_scale_init', type=float, default=1e-3)
+    parser.add_argument('--dream_residual_scale_init', type=float, default=1.0)
     parser.add_argument('--dream_apply_init_bias', type=float, default=-3.0)
     parser.add_argument('--dream_route_tau', type=float, default=0.5)
-    parser.add_argument('--dream_route_margin', type=float, default=0.0)
+    parser.add_argument('--dream_route_margin', type=float, default=0.01)
     parser.add_argument('--dream_clean_safe_margin', type=float, default=0.0)
     parser.add_argument('--dream_num_train_views', type=int, default=2)
     parser.add_argument('--dream_degradation_pool', nargs='+', default=['jpeg90', 'jpeg75', 'jpeg50', 'resize', 'blur', 'quant', 'webp'])
@@ -131,6 +131,14 @@ def get_args_parser():
     parser.add_argument('--dream_fast_return_prompt_tokens', type=str2bool, default=True)
     parser.add_argument('--dream_fast_compare_batchfold', type=str2bool, default=False)
     parser.add_argument('--dream_fast_log_shapes', type=str2bool, default=True)
+    parser.add_argument('--dream_fast_detach_anchor_prompt_pool', type=str2bool, default=False)
+    parser.add_argument('--dream_fast_force_bank_plus_anchor_for_train', type=str2bool, default=False)
+    parser.add_argument('--dream_warmup_freeze_router', type=str2bool, default=True)
+    parser.add_argument('--dream_warmup_fixed_apply', type=float, default=0.2)
+    parser.add_argument('--dream_balanced_degradation_views', type=str2bool, default=True)
+    parser.add_argument('--dream_light_degradation_pool', nargs='+', default=['jpeg90', 'jpeg75'])
+    parser.add_argument('--dream_strong_degradation_pool', nargs='+', default=['jpeg50', 'resize', 'blur', 'quant', 'webp'])
+    parser.add_argument('--dream_cavr_eps', type=float, default=1e-4)
     parser.add_argument('--dream_save_pred_csv', type=str2bool, default=False)
 
     # loss
@@ -168,6 +176,7 @@ def get_args_parser():
     parser.add_argument('--eval_selected_subsets_dev', nargs='+', default=[])
     parser.add_argument('--amp', type=str2bool, default=False)
     parser.add_argument('--amp_dtype', type=str, default='bf16', choices=['fp16', 'bf16'])
+    parser.add_argument('--tf32', type=str2bool, default=True)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -183,6 +192,23 @@ def main(args):
     init_distributed_mode(args)
     if getattr(args, 'method', 'iapl') == 'dream_cs' and getattr(args, 'dream_anchor_ckpt', ''):
         print('WARNING: dream_anchor_ckpt is a plugin/warmstart ablation, not the DREAM-CS Standalone main setting.')
+    if getattr(args, 'tf32', True):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+    if is_main_process() and getattr(args, 'method', 'iapl') == 'dream_cs':
+        mode = getattr(args, 'dream_fast_mode', 'off')
+        per_view = {'off': args.dream_num_experts + 1, 'bank_plus_anchor': 2, 'single_bank': 1}[mode]
+        if getattr(args, 'dream_fast_force_bank_plus_anchor_for_train', False) and mode == 'single_bank':
+            print('DREAM-CS Fast: train forward will use bank_plus_anchor because dream_fast_force_bank_plus_anchor_for_train=True.')
+        print('DREAM-CS Standalone: label convention real=0 fake=1; TTA={}'.format(args.tta))
+        print('DREAM-CS Fast config: mode={} readout={} deep_bank={} deep_residual={} expected_encoder_multiplier_per_view={}'.format(
+            mode,
+            getattr(args, 'dream_fast_readout', 'delta_from_prompt'),
+            getattr(args, 'dream_fast_deep_bank', True),
+            getattr(args, 'dream_fast_deep_residual', True),
+            per_view,
+        ))
 
     if args.output_dir:
         if os.path.basename(os.path.normpath(args.output_dir)) != args.model_name:
