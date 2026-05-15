@@ -120,7 +120,7 @@ def get_args_parser():
     parser.add_argument('--dream_tta_agg', type=str, default='mean', choices=['confidence', 'mean', 'trimmed_mean'])
     parser.add_argument('--dream_tta_disagreement_fallback', type=str2bool, default=True)
     parser.add_argument('--dream_tta_disagreement_thresh', type=float, default=0.05)
-    parser.add_argument('--dream_fast_mode', type=str, default='off',
+    parser.add_argument('--dream_fast_mode', type=str, default='bank_plus_anchor',
                         choices=['off', 'bank_plus_anchor', 'single_bank'])
     parser.add_argument('--dream_fast_readout', type=str, default='delta_from_prompt',
                         choices=['delta_from_prompt', 'prompt_direct', 'cls_plus_prompt'])
@@ -133,6 +133,11 @@ def get_args_parser():
     parser.add_argument('--dream_fast_log_shapes', type=str2bool, default=True)
     parser.add_argument('--dream_fast_detach_anchor_prompt_pool', type=str2bool, default=False)
     parser.add_argument('--dream_fast_force_bank_plus_anchor_for_train', type=str2bool, default=False)
+    parser.add_argument('--dream_expert_condition_mode', type=str, default='shared_anchor',
+                        choices=['shared_anchor', 'anchor_only', 'scaled', 'detached_scaled', 'none'])
+    parser.add_argument('--dream_expert_cond_scales', nargs='+', type=float, default=[1.0, 0.2, 0.0])
+    parser.add_argument('--dream_bank_ref_mode', type=str, default='auto',
+                        choices=['auto', 'anchor', 'base'])
     parser.add_argument('--dream_warmup_freeze_router', type=str2bool, default=True)
     parser.add_argument('--dream_warmup_fixed_apply', type=float, default=0.2)
     parser.add_argument('--dream_balanced_degradation_views', type=str2bool, default=True)
@@ -209,6 +214,31 @@ def main(args):
             getattr(args, 'dream_fast_deep_residual', True),
             per_view,
         ))
+        cond_mode = getattr(args, 'dream_expert_condition_mode', 'shared_anchor')
+        bank_ref = getattr(args, 'dream_bank_ref_mode', 'auto')
+        if bank_ref == 'auto':
+            resolved_bank_ref = 'anchor_ctx' if cond_mode == 'shared_anchor' else 'base_ctx'
+        elif bank_ref == 'anchor':
+            resolved_bank_ref = 'anchor_ctx'
+        else:
+            resolved_bank_ref = 'base_ctx'
+        anchor_uses_condition = cond_mode != 'none'
+        experts_inherit_condition = cond_mode == 'shared_anchor'
+        if cond_mode in ['scaled', 'detached_scaled']:
+            experts_inherit_condition = 'scaled'
+        print('DREAM-CS Expert condition config: mode={} cond_scales={} bank_ref_mode={} resolved_bank_ref={}'.format(
+            cond_mode,
+            getattr(args, 'dream_expert_cond_scales', [1.0, 0.2, 0.0]),
+            bank_ref,
+            resolved_bank_ref,
+        ))
+        print('DREAM-CS Expert condition semantics: anchor_uses_condition={} experts_inherit_condition={} anchor_only_means_experts_use_base_plus_residual={}'.format(
+            anchor_uses_condition,
+            experts_inherit_condition,
+            cond_mode == 'anchor_only',
+        ))
+        if mode == 'single_bank' and cond_mode == 'anchor_only':
+            print('WARNING: single_bank with anchor_only has no pure conditional anchor; use bank_plus_anchor for the main B-version ablation.')
 
     if args.output_dir:
         if os.path.basename(os.path.normpath(args.output_dir)) != args.model_name:
@@ -275,7 +305,15 @@ def main(args):
     model = model.to(device)
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+        find_unused = (
+            getattr(args, 'method', 'iapl') == 'dream_cs'
+            and getattr(args, 'dream_warmup_freeze_router', False)
+        )
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.gpu],
+            find_unused_parameters=find_unused,
+        )
         model_without_ddp = model.module
     if args.ema:
         model_ema = ModelEmaV2(model_without_ddp, decay=0.9999)

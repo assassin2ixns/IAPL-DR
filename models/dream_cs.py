@@ -197,16 +197,157 @@ class DREAMCSModel(CLIPModel):
         if self.conditional_ctx is not None:
             cond_bias, pred_bias = self.conditional_ctx(image_vp)
 
+        base_ctx = None
         if shared_ctx is not None:
-            shared_ctx = shared_ctx.expand(image_vp.shape[0], -1, -1)
+            base_ctx = shared_ctx.expand(image_vp.shape[0], -1, -1)
 
-        if cond_bias is not None:
-            anchor_ctx = shared_ctx + cond_bias if shared_ctx is not None else cond_bias
+        if base_ctx is not None and cond_bias is not None:
+            anchor_ctx = base_ctx + cond_bias
         else:
-            anchor_ctx = shared_ctx
+            anchor_ctx = base_ctx if base_ctx is not None else cond_bias
+
+        if getattr(self.args, 'dream_expert_condition_mode', 'shared_anchor') == 'none':
+            anchor_ctx = base_ctx
 
         assert anchor_ctx is not None, 'DREAM-CS Standalone requires shallow visual prompt context.'
-        return image_vp, anchor_ctx, deep_prompts, pred_bias
+        assert base_ctx is not None, 'DREAM-CS condition ablation requires base shallow prompt context.'
+        return {
+            'image_vp': image_vp,
+            'base_ctx': base_ctx,
+            'cond_bias': cond_bias,
+            'anchor_ctx': anchor_ctx,
+            'deep_prompts': deep_prompts,
+            'pred_bias': pred_bias,
+        }
+
+    def _get_expert_condition_scales(self, batch_size, dtype, device):
+        scales = list(getattr(self.args, 'dream_expert_cond_scales', [1.0, 0.2, 0.0]))
+        if len(scales) == 0:
+            scales = [1.0]
+        while len(scales) < self.num_experts:
+            scales.append(scales[-1])
+        scales = torch.tensor(scales[:self.num_experts], dtype=dtype, device=device)
+        return scales.view(1, self.num_experts, 1, 1)
+
+    def _context_norm(self, tensor, reduce_expert=False):
+        if tensor is None:
+            return None
+        t = tensor.float()
+        if reduce_expert:
+            return t.pow(2).mean(dim=(2, 3)).sqrt().mean(dim=0)
+        return t.pow(2).mean(dim=(1, 2)).sqrt().mean()
+
+    def _mean_prompt_cos(self, a, b):
+        if a is None or b is None:
+            return None
+        af = a.float().reshape(a.shape[0], -1)
+        bf = b.float().reshape(b.shape[0], -1)
+        return F.cosine_similarity(af, bf, dim=1, eps=1e-8).mean()
+
+    def _mean_prompt_cos_per_expert(self, ref_ctx, expert_ctx):
+        if ref_ctx is None or expert_ctx is None:
+            return None
+        vals = []
+        for idx in range(expert_ctx.shape[1]):
+            vals.append(self._mean_prompt_cos(ref_ctx, expert_ctx[:, idx]))
+        return torch.stack(vals, dim=0)
+
+    def _make_expert_contexts(self, base_ctx, anchor_ctx, cond_bias, residual):
+        bsz, k, prompt_len, prompt_dim = residual.shape
+        assert base_ctx.shape == (bsz, prompt_len, prompt_dim)
+        assert anchor_ctx.shape == (bsz, prompt_len, prompt_dim)
+        mode = getattr(self.args, 'dream_expert_condition_mode', 'shared_anchor')
+        bank_ref_mode = getattr(self.args, 'dream_bank_ref_mode', 'auto')
+
+        scales = self._get_expert_condition_scales(bsz, dtype=base_ctx.dtype, device=base_ctx.device)
+        cond_for_debug = cond_bias
+        if cond_bias is None:
+            cond_expanded = base_ctx.new_zeros((bsz, k, prompt_len, prompt_dim))
+        else:
+            cond_expanded = cond_bias.unsqueeze(1)
+
+        if mode == 'shared_anchor':
+            expert_base = anchor_ctx.unsqueeze(1).expand(-1, k, -1, -1)
+            default_ref = anchor_ctx
+            bank_ref_source = 'anchor_ctx'
+            inherits_condition = True
+            scale_debug = base_ctx.new_ones(k)
+        elif mode == 'anchor_only':
+            expert_base = base_ctx.unsqueeze(1).expand(-1, k, -1, -1)
+            default_ref = base_ctx
+            bank_ref_source = 'base_ctx'
+            inherits_condition = False
+            scale_debug = base_ctx.new_zeros(k)
+        elif mode == 'scaled':
+            expert_base = base_ctx.unsqueeze(1) + scales * cond_expanded
+            default_ref = base_ctx
+            bank_ref_source = 'base_ctx'
+            inherits_condition = True
+            scale_debug = scales.view(-1).to(dtype=base_ctx.dtype)
+        elif mode == 'detached_scaled':
+            cond_detached = cond_expanded.detach()
+            expert_base = base_ctx.unsqueeze(1) + scales * cond_detached
+            default_ref = base_ctx
+            bank_ref_source = 'base_ctx'
+            inherits_condition = True
+            scale_debug = scales.view(-1).to(dtype=base_ctx.dtype)
+        elif mode == 'none':
+            expert_base = base_ctx.unsqueeze(1).expand(-1, k, -1, -1)
+            default_ref = base_ctx
+            bank_ref_source = 'base_ctx'
+            inherits_condition = False
+            scale_debug = base_ctx.new_zeros(k)
+        else:
+            raise ValueError('Unsupported dream_expert_condition_mode: {}'.format(mode))
+
+        expert_ctx = expert_base + residual
+
+        if bank_ref_mode == 'auto':
+            bank_ref_ctx = default_ref
+        elif bank_ref_mode == 'anchor':
+            bank_ref_ctx = anchor_ctx
+            bank_ref_source = 'anchor_ctx'
+        elif bank_ref_mode == 'base':
+            bank_ref_ctx = base_ctx
+            bank_ref_source = 'base_ctx'
+        else:
+            raise ValueError('Unsupported dream_bank_ref_mode: {}'.format(bank_ref_mode))
+
+        has_cond = cond_for_debug is not None
+        cond_norm = self._context_norm(cond_for_debug) if has_cond else base_ctx.new_tensor(float('nan'))
+        residual_norm = self._context_norm(residual, reduce_expert=True)
+        residual_norm_mean = residual_norm.mean().clamp_min(1e-8)
+        expert_base_norm = self._context_norm(expert_base, reduce_expert=True)
+        expert_ctx_norm = self._context_norm(expert_ctx, reduce_expert=True)
+        cond_to_expert_base = cond_norm / expert_base_norm.clamp_min(1e-8) if has_cond else torch.full_like(expert_base_norm, float('nan'))
+        cond_residual_cos = self._mean_prompt_cos_per_expert(cond_for_debug, residual) if has_cond else torch.full((k,), float('nan'), device=base_ctx.device, dtype=base_ctx.dtype)
+        anchor_expert_cos = self._mean_prompt_cos_per_expert(anchor_ctx, expert_ctx)
+        base_expert_cos = self._mean_prompt_cos_per_expert(base_ctx, expert_ctx)
+        bank_ref_expert_delta = expert_ctx - bank_ref_ctx.unsqueeze(1)
+        cond_prompt_delta_cos = self._mean_prompt_cos_per_expert(cond_for_debug, bank_ref_expert_delta) if has_cond else torch.full((k,), float('nan'), device=base_ctx.device, dtype=base_ctx.dtype)
+
+        debug = {
+            'expert_condition_mode': mode,
+            'dream_expert_condition_mode': mode,
+            'dream_bank_ref_mode': bank_ref_mode,
+            'bank_ref_source': bank_ref_source,
+            'expert_inherits_condition': bool(inherits_condition),
+            'expert_cond_scale_per_expert': scale_debug.detach(),
+            'cond_bias_norm': cond_norm.detach(),
+            'base_ctx_norm': self._context_norm(base_ctx).detach(),
+            'anchor_ctx_norm': self._context_norm(anchor_ctx).detach(),
+            'expert_base_ctx_norm_per_expert': expert_base_norm.detach(),
+            'expert_ctx_norm_per_expert': expert_ctx_norm.detach(),
+            'prompt_residual_norm_per_expert': residual_norm.detach(),
+            'cond_to_residual_ratio': (cond_norm / residual_norm_mean).detach() if has_cond else base_ctx.new_tensor(float('nan')),
+            'cond_to_expert_base_ratio_per_expert': cond_to_expert_base.detach(),
+            'cond_residual_cos_per_expert': cond_residual_cos.detach(),
+            'cond_prompt_delta_cos_per_expert': cond_prompt_delta_cos.detach(),
+            'anchor_base_cos': self._mean_prompt_cos(anchor_ctx, base_ctx).detach(),
+            'anchor_expert_ctx_cos_per_expert': anchor_expert_cos.detach(),
+            'base_expert_ctx_cos_per_expert': base_expert_cos.detach(),
+        }
+        return bank_ref_ctx, expert_ctx, debug
 
     def _slice_deep_prompts(self, deep_prompts, start, end):
         sliced = []
@@ -319,12 +460,11 @@ class DREAMCSModel(CLIPModel):
             ], dim=1)
         return rel.detach(), image_stats.detach(), counterfactual_stats.detach(), feature_residual_norm.detach()
 
-    def _make_prompt_bank(self, anchor_ctx, residual):
-        bsz, prompt_len, prompt_dim = anchor_ctx.shape
-        k = residual.shape[1]
-        anchor_bank = anchor_ctx.unsqueeze(1)
-        expert_bank = anchor_ctx.unsqueeze(1) + residual
-        bank = torch.cat([anchor_bank, expert_bank], dim=1).reshape(bsz, (k + 1) * prompt_len, prompt_dim)
+    def _make_prompt_bank(self, bank_ref_ctx, expert_ctx):
+        bsz, prompt_len, prompt_dim = bank_ref_ctx.shape
+        k = expert_ctx.shape[1]
+        assert expert_ctx.shape == (bsz, k, prompt_len, prompt_dim)
+        bank = torch.cat([bank_ref_ctx.unsqueeze(1), expert_ctx], dim=1).reshape(bsz, (k + 1) * prompt_len, prompt_dim)
         assert bank.shape == (bsz, (k + 1) * prompt_len, prompt_dim)
         return bank
 
@@ -498,10 +638,16 @@ class DREAMCSModel(CLIPModel):
         self._debug_encoder_calls = 0
         bsz = image.shape[0]
         k = self.num_experts
-        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+        ctx_info = self._make_anchor_ctx(image)
+        image_vp = ctx_info['image_vp']
+        base_ctx = ctx_info['base_ctx']
+        cond_bias = ctx_info['cond_bias']
+        anchor_ctx = ctx_info['anchor_ctx']
+        deep_prompts = ctx_info['deep_prompts']
+        pred_bias = ctx_info['pred_bias']
 
         residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
-        expert_ctx = anchor_ctx.unsqueeze(1) + residual
+        _, expert_ctx, cond_debug = self._make_expert_contexts(base_ctx, anchor_ctx, cond_bias, residual)
         all_ctx = torch.cat([anchor_ctx.unsqueeze(1), expert_ctx], dim=1)
 
         prompt_len = anchor_ctx.shape[1]
@@ -531,16 +677,24 @@ class DREAMCSModel(CLIPModel):
             'anchor_purity': 'pure_anchor',
             'fast_readout': 'batchfold',
         }
+        fast_info.update(cond_debug)
         return self._finalize_forward_once(image, residual, h0, he, pred_bias, force_anchor, fast_info)
 
     def _forward_once_fast_bank_plus_anchor(self, image, force_anchor=False):
         self._debug_encoder_calls = 0
         bsz = image.shape[0]
         k = self.num_experts
-        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+        ctx_info = self._make_anchor_ctx(image)
+        image_vp = ctx_info['image_vp']
+        base_ctx = ctx_info['base_ctx']
+        cond_bias = ctx_info['cond_bias']
+        anchor_ctx = ctx_info['anchor_ctx']
+        deep_prompts = ctx_info['deep_prompts']
+        pred_bias = ctx_info['pred_bias']
         residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
         h0_pure = self._encode_with_context(image_vp, anchor_ctx, deep_prompts, return_prompt_tokens=False)
-        bank_ctx = self._make_prompt_bank(anchor_ctx, residual)
+        bank_ref_ctx, expert_ctx, cond_debug = self._make_expert_contexts(base_ctx, anchor_ctx, cond_bias, residual)
+        bank_ctx = self._make_prompt_bank(bank_ref_ctx, expert_ctx)
         bank_deep_prompts = self._make_deep_prompt_bank(deep_prompts, residual, bsz, anchor_ctx.dtype, anchor_ctx.device)
         for prompt in bank_deep_prompts:
             if torch.is_tensor(prompt) and prompt.dim() == 3:
@@ -568,6 +722,7 @@ class DREAMCSModel(CLIPModel):
             'fast_prompt_delta_scale': self.dream_fast_prompt_delta_scale.detach().view(-1).to(device=h0.device, dtype=h0.dtype),
             'prompt_delta_norm_per_expert': prompt_delta_norm.detach().mean(dim=0).to(device=h0.device, dtype=h0.dtype),
         }
+        fast_info.update(cond_debug)
         out = self._finalize_forward_once(image, residual, h0, he, pred_bias, force_anchor, fast_info)
         out['prompt_delta_logit_per_expert'] = out['delta_raw'].detach().mean(dim=0)
         return out
@@ -575,9 +730,16 @@ class DREAMCSModel(CLIPModel):
     def _forward_once_fast_single_bank(self, image, force_anchor=False):
         self._debug_encoder_calls = 0
         bsz = image.shape[0]
-        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+        ctx_info = self._make_anchor_ctx(image)
+        image_vp = ctx_info['image_vp']
+        base_ctx = ctx_info['base_ctx']
+        cond_bias = ctx_info['cond_bias']
+        anchor_ctx = ctx_info['anchor_ctx']
+        deep_prompts = ctx_info['deep_prompts']
+        pred_bias = ctx_info['pred_bias']
         residual = self.dream_expert_bank(bsz, dtype=anchor_ctx.dtype, device=anchor_ctx.device)
-        bank_ctx = self._make_prompt_bank(anchor_ctx, residual)
+        bank_ref_ctx, expert_ctx, cond_debug = self._make_expert_contexts(base_ctx, anchor_ctx, cond_bias, residual)
+        bank_ctx = self._make_prompt_bank(bank_ref_ctx, expert_ctx)
         bank_deep_prompts = self._make_deep_prompt_bank(deep_prompts, residual, bsz, anchor_ctx.dtype, anchor_ctx.device)
         for prompt in bank_deep_prompts:
             if torch.is_tensor(prompt) and prompt.dim() == 3:
@@ -605,6 +767,7 @@ class DREAMCSModel(CLIPModel):
             'fast_prompt_delta_scale': self.dream_fast_prompt_delta_scale.detach().view(-1).to(device=h0.device, dtype=h0.dtype),
             'prompt_delta_norm_per_expert': prompt_delta_norm.detach().mean(dim=0).to(device=h0.device, dtype=h0.dtype),
         }
+        fast_info.update(cond_debug)
         out = self._finalize_forward_once(image, residual, h0, he, pred_bias, force_anchor, fast_info)
         out['prompt_delta_logit_per_expert'] = out['delta_raw'].detach().mean(dim=0)
         return out

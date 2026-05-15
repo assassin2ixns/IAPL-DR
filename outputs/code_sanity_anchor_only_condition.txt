@@ -1,0 +1,70 @@
+### git status
+On branch main
+Your branch is ahead of 'origin/main' by 9 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   __pycache__/engine.cpython-310.pyc
+	modified:   __pycache__/main.cpython-310.pyc
+	modified:   engine.py
+	modified:   main.py
+	modified:   scripts/run_dream_cs_ufd_gpus67.sh
+	modified:   utils/__pycache__/dream_logging.cpython-310.pyc
+	modified:   utils/dream_logging.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	dream_cs_fast_bank_plus_anchor_ddp_gpus67_seed100.log
+	outputs/code_sanity_anchor_only_condition.txt
+	outputs/dream_cs_fast_bank_plus_anchor_ufd_ddp_gpus67_seed100/
+	outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint.pth
+	outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint_epoch_0.pth
+	outputs/dream_cs_standalone_ufd_progan_v03_seed100/checkpoint_last.pth
+	outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint.pth
+	outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint_epoch_0.pth
+	outputs/dream_cs_standalone_ufd_progan_v03_seed101/checkpoint_last.pth
+	scripts/tmp_eval_dream_cs_diffusion_ufd.sh
+
+no changes added to commit (use "git add" and/or "git commit -a")
+
+### grep dream_fast_mode
+main.py:123:    parser.add_argument('--dream_fast_mode', type=str, default='bank_plus_anchor',
+main.py:200:        mode = getattr(args, 'dream_fast_mode', 'off')
+models/dream_cs.py:613:        mode = getattr(self.args, 'dream_fast_mode', 'off')
+models/dream_cs.py:627:            raise ValueError('Unsupported dream_fast_mode: {}'.format(mode))
+models/dream_cs.py:631:                old_mode = self.args.dream_fast_mode
+models/dream_cs.py:632:                self.args.dream_fast_mode = 'off'
+models/dream_cs.py:634:                self.args.dream_fast_mode = old_mode
+
+### grep _make_anchor_ctx
+191:    def _make_anchor_ctx(self, image):
+501:        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+540:        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+578:        image_vp, anchor_ctx, deep_prompts, pred_bias = self._make_anchor_ctx(image)
+
+### grep _make_prompt_bank
+322:    def _make_prompt_bank(self, anchor_ctx, residual):
+543:        bank_ctx = self._make_prompt_bank(anchor_ctx, residual)
+580:        bank_ctx = self._make_prompt_bank(anchor_ctx, residual)
+
+### grep _forward_once_fast_bank_plus_anchor
+536:    def _forward_once_fast_bank_plus_anchor(self, image, force_anchor=False):
+623:            out = self._forward_once_fast_bank_plus_anchor(image, force_anchor=force_anchor)
+
+### grep cond_bias
+models/dream_cs.py:196:        cond_bias = None
+models/dream_cs.py:198:            cond_bias, pred_bias = self.conditional_ctx(image_vp)
+models/dream_cs.py:203:        if cond_bias is not None:
+models/dream_cs.py:204:            anchor_ctx = shared_ctx + cond_bias if shared_ctx is not None else cond_bias
+
+### grep expert_oracle_gain_ce
+559:    record['expert_oracle_gain_ce'] = _safe_torch_mean(ce_anchor - expert_oracle_ce)
+741:        'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
+1043:        record['expert_oracle_gain_ce'] = float(np.mean(ce_a - oracle_e))
+1115:                'expert_oracle_acc', 'candidate_oracle_acc', 'expert_oracle_gain_ce',
+1329:        f"expert_oracle_gain={last.get('mean_expert_oracle_gain_ce')} final_oracle_gap={last.get('mean_final_oracle_gap_ce')} expert_better_rates={[last.get(f'mean_expert{i}_better_than_anchor_rate') for i in range(3)]}",
+
+### grep feature_residual_cos
+623:                record[f'feature_residual_cos_e{a}e{b}'] = _safe_torch_mean(c)

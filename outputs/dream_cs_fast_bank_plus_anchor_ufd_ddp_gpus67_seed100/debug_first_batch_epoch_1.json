@@ -1,0 +1,107 @@
+{
+  "apply_max": 0.04541015625,
+  "apply_mean": 0.044952392578125,
+  "apply_min": 0.044677734375,
+  "apply_q10": 0.044677734375,
+  "apply_q50": 0.044677734375,
+  "apply_q90": 0.04541015625,
+  "apply_raw_max": 0.04541015625,
+  "apply_raw_mean": 0.044952392578125,
+  "apply_raw_min": 0.044677734375,
+  "apply_raw_q10": 0.044677734375,
+  "apply_raw_q50": 0.044677734375,
+  "apply_raw_q90": 0.04541015625,
+  "apply_raw_shape": [
+    8
+  ],
+  "apply_raw_std": 0.0003545822155341263,
+  "apply_shape": [
+    8
+  ],
+  "apply_std": 0.0003545822155341263,
+  "batch_size": 8,
+  "degradation": "none",
+  "delta_clamped_max": 0.015625,
+  "delta_clamped_mean": 0.0006510416666666666,
+  "delta_clamped_min": 0.0,
+  "delta_clamped_q10": 0.0,
+  "delta_clamped_q50": 0.0,
+  "delta_clamped_q90": 0.0,
+  "delta_clamped_shape": [
+    8,
+    3
+  ],
+  "delta_clamped_std": 0.0031222861479900522,
+  "delta_raw_max": 0.015625,
+  "delta_raw_mean": 0.0006510416666666666,
+  "delta_raw_min": 0.0,
+  "delta_raw_q10": 0.0,
+  "delta_raw_q50": 0.0,
+  "delta_raw_q90": 0.0,
+  "delta_raw_shape": [
+    8,
+    3
+  ],
+  "delta_raw_std": 0.0031222861479900522,
+  "domain": "train",
+  "epoch": 1,
+  "global_step": 1,
+  "iter": 0,
+  "label_values": [
+    0,
+    1,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0
+  ],
+  "logits_anchor_max": 2.96875,
+  "logits_anchor_mean": 0.0,
+  "logits_anchor_min": -2.96875,
+  "logits_anchor_q10": -2.946875,
+  "logits_anchor_q50": -0.0234375,
+  "logits_anchor_q90": 2.96875,
+  "logits_anchor_shape": [
+    8
+  ],
+  "logits_anchor_std": 2.941559279717774,
+  "logits_expert_max": 2.96875,
+  "logits_expert_mean": 0.0006510416666666666,
+  "logits_expert_min": -2.96875,
+  "logits_expert_q10": -2.959375,
+  "logits_expert_q50": -0.0234375,
+  "logits_expert_q90": 2.96875,
+  "logits_expert_shape": [
+    8,
+    3
+  ],
+  "logits_expert_std": 2.940910722033716,
+  "logits_final_max": 2.96875,
+  "logits_final_mean": 3.185868263244629e-05,
+  "logits_final_min": -2.96875,
+  "logits_final_q10": -2.946875,
+  "logits_final_q50": -0.0234375,
+  "logits_final_q90": 2.96875,
+  "logits_final_shape": [
+    8
+  ],
+  "logits_final_std": 2.9415274660349704,
+  "lr": null,
+  "model_name": "dream_cs_fast_bank_plus_anchor_ufd_ddp_gpus67_seed100",
+  "q_max": 0.3836096525192261,
+  "q_mean": 0.3333333246409893,
+  "q_min": 0.25228437781333923,
+  "q_q10": 0.25269618034362795,
+  "q_q50": 0.3642406463623047,
+  "q_q90": 0.38317984640598296,
+  "q_shape": [
+    8,
+    3
+  ],
+  "q_std": 0.057300543392159904,
+  "seed": 100,
+  "split": "train_debug",
+  "timestamp": "2026-05-14T21:05:32"
+}

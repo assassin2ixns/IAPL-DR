@@ -130,6 +130,63 @@ def add_distribution(record, prefix, values, minmax=False):
         record[f'{prefix}_max'] = float(np.max(arr))
 
 
+def _output_scalar(outputs, key, default=float('nan')):
+    value = outputs.get(key, default)
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return default
+        return float(value.detach().float().mean().cpu().item())
+    if isinstance(value, (int, float, bool, np.floating, np.integer)):
+        return float(value)
+    return value
+
+
+def _output_vector(outputs, key):
+    value = outputs.get(key, None)
+    if value is None:
+        return np.asarray([])
+    if isinstance(value, torch.Tensor):
+        return value.detach().float().cpu().view(-1).numpy()
+    return np.asarray(value, dtype=np.float64).reshape(-1)
+
+
+def add_condition_context_metrics(record, args, outputs):
+    record['dream_expert_condition_mode'] = outputs.get(
+        'dream_expert_condition_mode',
+        outputs.get('expert_condition_mode', getattr(args, 'dream_expert_condition_mode', 'shared_anchor')),
+    )
+    record['dream_bank_ref_mode'] = outputs.get('dream_bank_ref_mode', getattr(args, 'dream_bank_ref_mode', 'auto'))
+    record['bank_ref_source'] = outputs.get('bank_ref_source', 'anchor_ctx')
+    record['expert_inherits_condition'] = outputs.get(
+        'expert_inherits_condition',
+        getattr(args, 'dream_expert_condition_mode', 'shared_anchor') == 'shared_anchor',
+    )
+    for key in [
+        'base_ctx_norm',
+        'cond_bias_norm',
+        'anchor_ctx_norm',
+        'cond_to_residual_ratio',
+        'anchor_base_cos',
+    ]:
+        if key in outputs:
+            record[key] = _output_scalar(outputs, key)
+    vector_map = {
+        'expert_cond_scale_per_expert': 'expert_cond_scale_e{}',
+        'expert_base_ctx_norm_per_expert': 'expert_base_ctx_norm_e{}',
+        'expert_ctx_norm_per_expert': 'expert_ctx_norm_e{}',
+        'prompt_residual_norm_per_expert': 'prompt_residual_norm_e{}',
+        'cond_to_expert_base_ratio_per_expert': 'cond_to_expert_base_ratio_e{}',
+        'cond_residual_cos_per_expert': 'cond_residual_cos_e{}',
+        'cond_prompt_delta_cos_per_expert': 'cond_prompt_delta_cos_e{}',
+        'anchor_expert_ctx_cos_per_expert': 'anchor_expert_ctx_cos_e{}',
+        'base_expert_ctx_cos_per_expert': 'base_expert_ctx_cos_e{}',
+    }
+    for src, pattern in vector_map.items():
+        vals = _output_vector(outputs, src)
+        for idx in range(min(3, vals.shape[0])):
+            record[pattern.format(idx)] = float(vals[idx])
+
+
 def safe_mean(arr):
     arr = np.asarray(arr, dtype=np.float64).reshape(-1)
     if arr.size == 0:
@@ -420,6 +477,7 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
         pe_norm = pe_f.pow(2).mean(dim=-1).sqrt()
         for idx in range(min(3, pe_norm.shape[1])):
             record[f'pe_norm_e{idx}'] = _safe_torch_mean(pe_norm[:, idx])
+    add_condition_context_metrics(record, args, outputs)
     clean_loss = abs(record.get('loss_dream_clean', 0.0)) + EPS
     record['ratio_rob_to_clean'] = record.get('loss_dream_rob', 0.0) / clean_loss
     record['ratio_clean_safe_to_clean'] = record.get('loss_dream_clean_safe', 0.0) / clean_loss
@@ -635,6 +693,9 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
     record['grad_norm_conditional_ctx'] = _grad_norm_named(model, 'conditional_ctx')
     record['grad_norm_fc_binary'] = _grad_norm_named(model, 'fc_binary')
     record['grad_norm_adapters'] = _grad_norm_named(model, 'adapter')
+    expert_bank_grad = grad_a + grad_b + grad_scale
+    record['grad_ratio_cond_to_expert_bank'] = record['grad_norm_conditional_ctx'] / (expert_bank_grad + EPS)
+    record['grad_ratio_cond_to_router'] = record['grad_norm_conditional_ctx'] / (grad_router + EPS)
     record['update_ratio_expert_scale'] = lr * grad_scale / (_param_norm_named(model, 'dream_expert_bank.scale') + EPS)
     record['update_ratio_router'] = lr * grad_router / (_param_norm_named(model, 'dream_router') + EPS)
     record['update_ratio_prompt_ctx'] = lr * grad_prompt / (_param_norm_named(model, 'prompt_learner.ctx') + EPS)
@@ -720,11 +781,28 @@ def compute_train_record(args, outputs, labels, loss_dict, weight_dict, model, o
 def concise_console_record(record):
     keys = [
         'dream_fast_mode', 'dream_encoder_calls',
-        'loss_total', 'lr', 'train_acc_final', 'train_acc_anchor',
+        'dream_expert_condition_mode', 'bank_ref_source',
+        'loss_total',
+        'loss_dream_clean',
+        'loss_dream_anchor',
+        'loss_dream_expert',
+        'loss_dream_specialize',
+        'loss_dream_anchor_rob',
+        'loss_dream_rob',
+        'loss_dream_inv',
+        'loss_dream_route',
+        'loss_dream_apply',
+        'loss_dream_clean_safe',
+        'loss_dream_res',
+        'loss_dream_div',
+        'loss_condition',
+        'loss_contrast',
+        'lr', 'train_acc_final', 'train_acc_anchor',
         'train_racc_final', 'train_facc_final', 'apply_eff_mean',
         'q_entropy_mean', 'correction_abs_mean', 'cavr', 'help_rate',
         'harm_rate', 'expert_oracle_gain_ce', 'final_oracle_gap_ce',
         'active_rate', 'residual_cos_offdiag_mean',
+        'cond_to_residual_ratio',
         'max_gpu_mem_mb',
     ]
     return {k: record[k] for k in keys if k in record}
@@ -811,6 +889,8 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
     fast_scale = to_numpy(outputs.get('fast_prompt_delta_scale')).reshape(-1)
     prompt_delta_norm = to_numpy(outputs.get('prompt_delta_norm_per_expert')).reshape(-1)
     prompt_delta_logit = to_numpy(outputs.get('prompt_delta_logit_per_expert')).reshape(-1)
+    condition_record = {}
+    add_condition_context_metrics(condition_record, args, outputs)
 
     bank_cls = outputs.get('bank_cls', None)
     bank_cls_norm = to_numpy(bank_cls.detach().float().pow(2).mean(dim=-1).sqrt()) if isinstance(bank_cls, torch.Tensor) else np.full_like(z, np.nan)
@@ -868,6 +948,7 @@ def build_prediction_rows(args, outputs, labels, domain, degradation, start_inde
             'bank_cls_norm': float(bank_cls_norm[i]) if i < len(bank_cls_norm) else float('nan'),
             'p0_norm': float(p0_norm[i]) if i < len(p0_norm) else float('nan'),
         }
+        row.update(condition_record)
         for e in range(min(3, ze.shape[1])):
             row[f'p_expert{e}'] = float(pe[i, e])
             row[f'z_expert{e}'] = float(ze[i, e])
@@ -941,6 +1022,29 @@ def domain_metrics_from_rows(args, rows, epoch, domain, degradation):
     for key in ['bank_cls_norm', 'p0_norm']:
         if rows and key in rows[0]:
             record[key] = safe_mean([r.get(key, float('nan')) for r in rows])
+    if rows:
+        for key in ['dream_expert_condition_mode', 'dream_bank_ref_mode', 'bank_ref_source', 'expert_inherits_condition']:
+            if key in rows[0]:
+                record[key] = rows[0].get(key)
+        cond_numeric = [
+            'base_ctx_norm', 'cond_bias_norm', 'anchor_ctx_norm',
+            'cond_to_residual_ratio', 'anchor_base_cos',
+        ]
+        for e in range(3):
+            cond_numeric.extend([
+                f'expert_cond_scale_e{e}',
+                f'expert_base_ctx_norm_e{e}',
+                f'expert_ctx_norm_e{e}',
+                f'prompt_residual_norm_e{e}',
+                f'cond_to_expert_base_ratio_e{e}',
+                f'cond_residual_cos_e{e}',
+                f'cond_prompt_delta_cos_e{e}',
+                f'anchor_expert_ctx_cos_e{e}',
+                f'base_expert_ctx_cos_e{e}',
+            ])
+        for key in cond_numeric:
+            if key in rows[0]:
+                record[key] = safe_mean([r.get(key, float('nan')) for r in rows])
     record.update(binary_metrics(y, p_final, 'final'))
     record.update(binary_metrics(y, p_anchor, 'anchor'))
     for e in range(3):
@@ -1204,6 +1308,16 @@ def write_startup_sanity(args, model):
     config['sanity_checks'] = checks
     config['sanity_warnings'] = warnings
     config['label_convention'] = checks['label_convention']
+    cond_mode = getattr(args, 'dream_expert_condition_mode', 'shared_anchor')
+    bank_ref_mode = getattr(args, 'dream_bank_ref_mode', 'auto')
+    config['dream_expert_condition_semantics'] = {
+        'mode': cond_mode,
+        'expert_cond_scales': getattr(args, 'dream_expert_cond_scales', [1.0, 0.2, 0.0]),
+        'bank_ref_mode': bank_ref_mode,
+        'anchor_uses_condition': cond_mode != 'none',
+        'experts_inherit_condition': cond_mode == 'shared_anchor' or cond_mode in ['scaled', 'detached_scaled'],
+        'b_version_anchor_only_definition': 'anchor=base+cond, experts=base+residual, bank_ref=base when bank_ref_mode=auto',
+    }
     write_json(args.output_dir, 'config_snapshot.json', config)
     text = ['DREAM-CS Standalone sanity check', '']
     for key, value in checks.items():
@@ -1211,6 +1325,14 @@ def write_startup_sanity(args, model):
     if warnings:
         text.extend(['', 'Warnings:'])
         text.extend(warnings)
+    text.extend([
+        '',
+        'DREAM-CS expert condition mode:',
+        f"mode: {cond_mode}",
+        f"expert_cond_scales: {getattr(args, 'dream_expert_cond_scales', [1.0, 0.2, 0.0])}",
+        f"bank_ref_mode: {bank_ref_mode}",
+        'anchor_only definition: anchor=base+cond, experts=base+residual, bank_ref=base(auto).',
+    ])
     text.append('')
     text.append('Train degradation uses GPU tensor jpeg-like/webp-like approximation, not real codecs.')
     Path(args.output_dir, 'sanity_check.txt').write_text('\n'.join(text))

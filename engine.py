@@ -1,4 +1,5 @@
 import math
+import os
 import sys
 import time
 from itertools import islice
@@ -34,6 +35,8 @@ try:
 except Exception:
     tqdm = None
 
+_TQDM_TTY = None
+
 
 def unwrap_model(model):
     return model.module if hasattr(model, 'module') else model
@@ -51,13 +54,35 @@ def extract_logits_flat(outputs):
     return extract_logits(outputs).view(-1)
 
 
+def _progress_file():
+    global _TQDM_TTY
+    if sys.stderr.isatty():
+        return sys.stderr
+    if _TQDM_TTY is not None:
+        return _TQDM_TTY
+    try:
+        if os.path.exists('/dev/tty'):
+            _TQDM_TTY = open('/dev/tty', 'w')
+            return _TQDM_TTY
+    except OSError:
+        return None
+    return None
+
+
 def _progress_enabled():
-    return utils.is_main_process() and tqdm is not None and sys.stderr.isatty()
+    return utils.is_main_process() and tqdm is not None and _progress_file() is not None
 
 
 def _make_progress(iterable, total=None, desc='', leave=True):
     if _progress_enabled():
-        return tqdm(iterable, total=total, desc=desc, dynamic_ncols=True, leave=leave)
+        return tqdm(
+            iterable,
+            total=total,
+            desc=desc,
+            dynamic_ncols=True,
+            leave=leave,
+            file=_progress_file(),
+        )
     return iterable
 
 
@@ -81,10 +106,7 @@ def _progress_postfix(progress, values):
 
 
 def _console_print(message):
-    if _progress_enabled():
-        tqdm.write(message)
-    else:
-        print(message)
+    print(message)
 
 
 @torch.no_grad()
